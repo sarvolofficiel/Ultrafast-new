@@ -1,0 +1,8 @@
+{
+  "name": "Pixel Turbo 3D",
+  "description": "Jeu de course automobile en ligne en pixel 3D avec hébergement P2P direct depuis le PC de l'hôte.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
