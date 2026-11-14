@@ -480,14 +480,18 @@ export function stepRaceSimulation(
     // Checkpoint & Lap / Sprint Stage Progression
     if (!r.finished) {
       if (track.isLoop) {
+        // Advance every checkpoint already passed. Using exact quarter equality
+        // can miss a checkpoint when a fast car skips over a segment between frames.
         const quarter = Math.floor(proj.progress * 4);
-        if (quarter === 1 && r.maxCheckpoint === 0) r.maxCheckpoint = 1;
-        else if (quarter === 2 && r.maxCheckpoint === 1) r.maxCheckpoint = 2;
-        else if (quarter === 3 && r.maxCheckpoint >= 2) r.maxCheckpoint = 3;
+        if (quarter >= 1 && r.maxCheckpoint < 1) r.maxCheckpoint = 1;
+        if (quarter >= 2 && r.maxCheckpoint < 2) r.maxCheckpoint = 2;
+        if (quarter >= 3 && r.maxCheckpoint < 3) r.maxCheckpoint = 3;
 
         const prevProg = prevSeg / track.segments;
-        // Crossed start/finish line forward
-        if (prevProg > 0.85 && proj.progress < 0.15 && r.maxCheckpoint >= 2) {
+        // Detect a forward wrap across the start/finish line after the middle
+        // checkpoints have been reached. A wider window tolerates larger frame steps.
+        const crossedStartFinish = prevProg > 0.75 && proj.progress < 0.25;
+        if (crossedStartFinish && r.maxCheckpoint >= 2) {
           const lapTime = raceElapsedMs - r.lapStartTimeMs;
           r.lastLapMs = lapTime;
           if (r.bestLapMs === null || lapTime < r.bestLapMs) {
