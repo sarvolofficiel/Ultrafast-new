@@ -278,13 +278,12 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                   );
                 })}
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1">
+              <div className="grid grid-cols-3 gap-1">
                 {(
                   [
                     { id: 'random', label: 'Aléatoire' },
                     { id: 'sprint', label: 'Sprint' },
                     { id: 'circuit', label: 'Circuit' },
-                    { id: 'battle-royale', label: 'Battle Royale' },
                   ] as const
                 ).map((opt) => {
                   const active = formatPreference === opt.id;
@@ -311,7 +310,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                     ? 'Étape Sprint (A→B)'
                     : raceFormat === 'circuit'
                       ? 'Circuit (3 tours)'
-                      : 'Battle Royale (Arène Sumo)'}
+                      : 'Circuit (3 tours)'}
                 </span>
               </div>
             </div>
