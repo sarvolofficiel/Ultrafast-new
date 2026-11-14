@@ -78,8 +78,7 @@ export function resolveRaceFormat(
 ): RaceFormat {
   if (pref === 'sprint' || pref === 'circuit') return pref;
   const r = mulberry32(seed ^ 0x9e3779b9)();
-  if (r < 0.48) return 'sprint';
-  return r < 0.5 ? 'sprint' : 'circuit';
+  return r < 0.48 ? 'sprint' : 'circuit';
 }
 
 function mulberry32(seed: number): () => number {
