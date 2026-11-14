@@ -306,11 +306,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
               <div className="text-[10px] font-semibold text-slate-400">
                 Mode actif :{' '}
                 <span className="text-amber-300">
-                  {raceFormat === 'sprint'
-                    ? 'Étape Sprint (A→B)'
-                    : raceFormat === 'circuit'
-                      ? 'Circuit (3 tours)'
-                      : 'Circuit (3 tours)'}
+                  {raceFormat === 'sprint' ? 'Étape Sprint (A→B)' : 'Circuit (3 tours)'}
                 </span>
               </div>
             </div>
