@@ -124,7 +124,7 @@ export interface RacerState {
   // Race progression
   segIndex: number;
   lap: number; // 1..totalLaps
-  maxCheckpoint: number; // 0..3 quarter-track checkpoints
+  maxCheckpoint: number; // -1 before first start-line crossing, then 0..3 checkpoints
   totalProgress: number; // monotonic race progress for ranking
   rank: number; // 1..N
   finished: boolean;
