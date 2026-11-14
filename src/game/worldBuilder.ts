@@ -146,57 +146,7 @@ export function buildTrackWorld(
 
   const asphaltTex = keep(createAsphaltTexture(trackId, maxAniso));
 
-  if (track.format === 'battle-royale') {
-    const arenaRadius = 78;
-    const arenaGeo = keep(new THREE.CircleGeometry(arenaRadius, 64));
-    const arenaMat = keep(
-      new THREE.MeshStandardMaterial({
-        map: asphaltTex,
-        roughness: 0.82,
-        metalness: 0.1,
-      }),
-    );
-    const arenaMesh = new THREE.Mesh(arenaGeo, arenaMat);
-    arenaMesh.rotation.x = -Math.PI / 2;
-    arenaMesh.position.set(0, 0.04, 0);
-    arenaMesh.receiveShadow = true;
-    group.add(arenaMesh);
-
-    // Perimeter hazard ring
-    const ringGeo = keep(new THREE.RingGeometry(arenaRadius - 2.5, arenaRadius, 64));
-    const ringMat = keep(
-      new THREE.MeshBasicMaterial({
-        color: 0xffbe0b,
-        side: THREE.DoubleSide,
-      }),
-    );
-    const ringMesh = new THREE.Mesh(ringGeo, ringMat);
-    ringMesh.rotation.x = -Math.PI / 2;
-    ringMesh.position.set(0, 0.06, 0);
-    group.add(ringMesh);
-
-    // Ocean surrounding platform
-    const oceanGeo = keep(new THREE.PlaneGeometry(worldSize + 400, worldSize + 400, 56, 56));
-    const oceanMat = keep(
-      createOceanMaterial(
-        track.meta.fogColor,
-        0.003,
-        arenaRadius + 10,
-        0,
-        0,
-        trackId,
-      ),
-    );
-    shaderUpdaters.push({
-      update: (t) => {
-        oceanMat.uniforms.uTime.value = t;
-      },
-    });
-    const ocean = new THREE.Mesh(oceanGeo, oceanMat);
-    ocean.rotation.x = -Math.PI / 2;
-    ocean.position.set(0, -0.35, 0);
-    group.add(ocean);
-  } else {
+  {
     // Coastal sunlit ocean shader for Baie Pixel
     if (trackId === 'baie-pixel') {
       const islandRadius = Math.max(spanX, spanZ) * 0.55 + 45;
