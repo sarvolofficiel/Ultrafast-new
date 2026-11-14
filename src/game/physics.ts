@@ -85,13 +85,14 @@ export function computeAIInput(
   leaderProgress: number,
 ): PlayerInput {
   const N = track.segments;
-  const lookAhead = 14;
+  const lookAhead = Math.max(10, Math.min(24, 10 + Math.floor(racer.speed * 0.22)));
   const targetIdx = track.isLoop
     ? (racer.segIndex + lookAhead) % N
     : Math.min(N - 1, racer.segIndex + lookAhead);
+  const farLookAhead = Math.max(24, Math.min(42, lookAhead + 18));
   const farIdx = track.isLoop
-    ? (racer.segIndex + 26) % N
-    : Math.min(N - 1, racer.segIndex + 26);
+    ? (racer.segIndex + farLookAhead) % N
+    : Math.min(N - 1, racer.segIndex + farLookAhead);
 
   // Deterministic preferred lane per AI slot
   const baseLane = ((racer.slotIndex % 3) - 1) * (track.halfWidth * 0.34);
@@ -108,20 +109,22 @@ export function computeAIInput(
     }
   }
 
-  // Overtake slower car directly ahead
+  // Pick the closest car ahead and make one clear lane change to avoid oscillation.
+  let nearestAhead = Infinity;
+  let avoidanceOffset = 0;
   for (const other of allRacers) {
     if (other.id === racer.id) continue;
     const dx = other.x - racer.x;
     const dz = other.z - racer.z;
-    const d2 = dx * dx + dz * dz;
-    if (d2 < 85) {
-      const fwdDot = dx * Math.sin(racer.heading) + dz * Math.cos(racer.heading);
-      if (fwdDot > 0) {
-        const rightDot = dx * Math.cos(racer.heading) - dz * Math.sin(racer.heading);
-        targetLane += rightDot > 0 ? -3.6 : 3.6;
-      }
+    const forward = dx * Math.sin(racer.heading) + dz * Math.cos(racer.heading);
+    const lateral = dx * Math.cos(racer.heading) - dz * Math.sin(racer.heading);
+    const distanceSq = dx * dx + dz * dz;
+    if (forward > 0 && forward < 13 && Math.abs(lateral) < 5.2 && distanceSq < nearestAhead) {
+      nearestAhead = distanceSq;
+      avoidanceOffset = lateral >= 0 ? -4.2 : 4.2;
     }
   }
+  targetLane += avoidanceOffset;
   targetLane = Math.max(-track.halfWidth * 0.7, Math.min(track.halfWidth * 0.7, targetLane));
 
   const p = track.points[targetIdx];
@@ -136,22 +139,24 @@ export function computeAIInput(
   const tNow = track.tangents[racer.segIndex];
   const tFar = track.tangents[farIdx];
   const cornerDot = tNow.x * tFar.x + tNow.z * tFar.z;
-  const sharpTurn = cornerDot < 0.78;
+  const cornerSeverity = 1 - cornerDot;
+  const sharpTurn = cornerDot < 0.82;
 
   const steer = Math.max(-1, Math.min(1, diff * 2.2));
-  const shouldDrift = sharpTurn && Math.abs(diff) > 0.28 && racer.speed > 26;
+  const shouldDrift = sharpTurn && Math.abs(diff) > 0.22 && racer.speed > 23;
 
   // Gentle arcade catch-up only when far behind; bots use nitro sparingly
   const behindLeader = leaderProgress - racer.totalProgress;
   const useBoost =
-    racer.nitroEnergy > 78 &&
+    racer.nitroEnergy > 62 &&
     !sharpTurn &&
-    behindLeader > 0.35 &&
-    Math.random() < 0.008;
+    behindLeader > 0.18 &&
+    racer.boostTimer <= 0.1 &&
+    Math.random() < 0.018;
 
   return {
-    throttle: sharpTurn && racer.speed > 36 ? 0.55 : 0.95,
-    brake: sharpTurn && racer.speed > 45 ? 0.45 : 0,
+    throttle: cornerSeverity > 0.42 && racer.speed > 34 ? 0.58 : 1,
+    brake: cornerSeverity > 0.55 && racer.speed > 39 ? Math.min(0.62, 0.35 + cornerSeverity * 0.35) : 0,
     steer,
     drift: shouldDrift,
     boost: useBoost,
@@ -575,42 +580,10 @@ export function stepRaceSimulation(
     }
   }
 
-  // Battle Royale arena boundary check & elimination
-  if (track.format === 'battle-royale') {
-    for (const r of racers) {
-      if (!r.finished) {
-        const distFromCenter = Math.hypot(r.x, r.z);
-        if (distFromCenter > 78 || r.y < -1) {
-          r.finished = true;
-          r.finishTimeMs = raceElapsedMs;
-          r.y = -6;
-          r.speed = 0;
-          r.vx = 0;
-          r.vz = 0;
-          events.push({ type: 'collision', x: r.x, z: r.z, racerId: r.id, intensity: 2.0 });
-        }
-      }
-    }
 
-    const activeRacers = racers.filter((r) => !r.finished);
-    if (activeRacers.length <= 1 && racers.length > 1) {
-      for (const r of activeRacers) {
-        if (!r.finished) {
-          r.finished = true;
-          r.finishTimeMs = raceElapsedMs;
-        }
-      }
-    }
-  }
 
   // Update live ranks
   const sorted = [...racers].sort((a, b) => {
-    if (track.format === 'battle-royale') {
-      if (a.finished && b.finished) return b.finishTimeMs - a.finishTimeMs;
-      if (a.finished) return 1;
-      if (b.finished) return -1;
-      return 0;
-    }
     if (a.finished && b.finished) return a.finishTimeMs - b.finishTimeMs;
     if (a.finished) return -1;
     if (b.finished) return 1;
