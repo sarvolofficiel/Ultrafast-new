@@ -63,7 +63,8 @@ export function createInitialRacers(
       braking: false,
       segIndex: spawn.segIndex,
       lap: 1,
-      maxCheckpoint: 0,
+      // -1 means the racer has not crossed the start line for the first time yet.
+      maxCheckpoint: track.isLoop ? -1 : 0,
       totalProgress: track.isLoop
         ? -0.02 * (idx + 1)
         : (spawn.segIndex - track.startSegIndex) /
@@ -480,17 +481,22 @@ export function stepRaceSimulation(
     // Checkpoint & Lap / Sprint Stage Progression
     if (!r.finished) {
       if (track.isLoop) {
-        // Advance every checkpoint already passed. Using exact quarter equality
-        // can miss a checkpoint when a fast car skips over a segment between frames.
-        const quarter = Math.floor(proj.progress * 4);
-        if (quarter >= 1 && r.maxCheckpoint < 1) r.maxCheckpoint = 1;
-        if (quarter >= 2 && r.maxCheckpoint < 2) r.maxCheckpoint = 2;
-        if (quarter >= 3 && r.maxCheckpoint < 3) r.maxCheckpoint = 3;
-
         const prevProg = prevSeg / track.segments;
-        // Detect a forward wrap across the start/finish line after the middle
-        // checkpoints have been reached. A wider window tolerates larger frame steps.
-        const crossedStartFinish = prevProg > 0.75 && proj.progress < 0.25;
+        // Racers spawn just before the start/finish line (near progress 1.0).
+        // Do not treat that initial position as having passed the final checkpoint.
+        const crossedStartFinish = prevProg > 0.85 && proj.progress < 0.15;
+
+        if (r.maxCheckpoint < 0) {
+          // First crossing only arms lap counting; it is not a completed lap.
+          if (crossedStartFinish) r.maxCheckpoint = 0;
+        } else {
+          // Advance every checkpoint already passed. This also handles large frame steps.
+          const quarter = Math.floor(proj.progress * 4);
+          if (quarter >= 1 && r.maxCheckpoint < 1) r.maxCheckpoint = 1;
+          if (quarter >= 2 && r.maxCheckpoint < 2) r.maxCheckpoint = 2;
+          if (quarter >= 3 && r.maxCheckpoint < 3) r.maxCheckpoint = 3;
+        }
+
         if (crossedStartFinish && r.maxCheckpoint >= 2) {
           const lapTime = raceElapsedMs - r.lapStartTimeMs;
           r.lastLapMs = lapTime;
@@ -511,7 +517,7 @@ export function stepRaceSimulation(
         }
 
         const effectiveProg =
-          r.lap === 1 && r.maxCheckpoint === 0 && proj.progress > 0.8
+          r.lap === 1 && r.maxCheckpoint <= 0 && proj.progress > 0.8
             ? proj.progress - 1
             : proj.progress;
         r.totalProgress = r.lap - 1 + effectiveProg;
