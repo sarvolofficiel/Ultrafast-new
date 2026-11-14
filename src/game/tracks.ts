@@ -76,11 +76,9 @@ export function resolveRaceFormat(
   pref: RaceFormatPreference,
   seed: number,
 ): RaceFormat {
-  if (pref === 'sprint' || pref === 'circuit' || pref === 'battle-royale') return pref;
+  if (pref === 'sprint' || pref === 'circuit') return pref;
   const r = mulberry32(seed ^ 0x9e3779b9)();
-  if (r < 0.48) return 'sprint';
-  if (r < 0.82) return 'circuit';
-  return 'battle-royale';
+  return r < 0.48 ? 'sprint' : 'circuit';
 }
 
 function mulberry32(seed: number): () => number {
@@ -382,36 +380,12 @@ export function getTrackData(
   if (cached) return cached;
 
   const meta = TRACK_METAS[trackId];
-  const isLoop = format === 'circuit' || format === 'battle-royale';
-  const segments = format === 'battle-royale' ? 360 : isLoop ? 640 : 680;
+  const isLoop = format === 'circuit';
+  const segments = isLoop ? 640 : 680;
 
   let chosenSampled: ReturnType<typeof sampleCurve> | null = null;
 
-  if (format === 'battle-royale') {
-    const radius = 75;
-    const points: THREE.Vector3[] = [];
-    const tangents: THREE.Vector3[] = [];
-    const normals: THREE.Vector3[] = [];
-    const cumLengths: number[] = [0];
-    const segs = 360;
-    for (let i = 0; i < segs; i++) {
-      const theta = (i / segs) * Math.PI * 2;
-      const x = Math.sin(theta) * radius;
-      const z = Math.cos(theta) * radius;
-      points.push(new THREE.Vector3(x, 0, z));
-      const nextTheta = ((i + 1) / segs) * Math.PI * 2;
-      const nx = Math.sin(nextTheta) * radius;
-      const nz = Math.cos(nextTheta) * radius;
-      const t = new THREE.Vector3(nx - x, 0, nz - z).normalize();
-      tangents.push(t);
-      normals.push(new THREE.Vector3(-t.z, 0, t.x).normalize());
-      if (i > 0) {
-        cumLengths.push(cumLengths[i - 1] + points[i].distanceTo(points[i - 1]));
-      }
-    }
-    const totalLength = cumLengths[segs - 1] + points[0].distanceTo(points[segs - 1]);
-    chosenSampled = { points, tangents, normals, cumLengths, totalLength };
-  } else {
+  {
     for (let attempt = 0; attempt < 32; attempt++) {
       const attemptSeed = safeSeed + attempt * 7919;
       const rawPts = isLoop
@@ -626,14 +600,7 @@ export function getSpawnTransform(
   slotIndex: number,
   totalRacers = 8,
 ): { x: number; z: number; heading: number; segIndex: number } {
-  if (track.format === 'battle-royale') {
-    const angle = (slotIndex / Math.max(1, totalRacers)) * Math.PI * 2;
-    const spawnRadius = 38;
-    const x = Math.sin(angle) * spawnRadius;
-    const z = Math.cos(angle) * spawnRadius;
-    const heading = Math.atan2(-x, -z);
-    return { x, z, heading, segIndex: Math.floor((slotIndex / totalRacers) * track.segments) };
-  }
+
 
   const row = Math.floor(slotIndex / 2);
   const col = slotIndex % 2;

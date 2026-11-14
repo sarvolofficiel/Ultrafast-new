@@ -1,7 +1,7 @@
 export type TrackId = 'baie-pixel' | 'canyon-turbo' | 'nuit-neon';
 
-export type RaceFormat = 'sprint' | 'circuit' | 'battle-royale';
-export type RaceFormatPreference = 'random' | 'sprint' | 'circuit' | 'battle-royale';
+export type RaceFormat = 'sprint' | 'circuit';
+export type RaceFormatPreference = 'random' | 'sprint' | 'circuit';
 
 export type CarColorId =
   | 'crimson'
