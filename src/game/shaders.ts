@@ -176,6 +176,19 @@ export function createOceanMaterial(
   trackId: TrackId,
 ): THREE.ShaderMaterial {
   const sun = getTrackSunConfig(trackId);
+  const deepColor =
+    trackId === 'nuit-neon'
+      ? new THREE.Color(0x060b24)
+      : trackId === 'canyon-turbo'
+        ? new THREE.Color(0x0b3a4a)
+        : new THREE.Color(0.02, 0.38, 0.68);
+  const shallowColor =
+    trackId === 'nuit-neon'
+      ? new THREE.Color(0x0a3b5c)
+      : trackId === 'canyon-turbo'
+        ? new THREE.Color(0x16808a)
+        : new THREE.Color(0.06, 0.72, 0.85);
+
   return new THREE.ShaderMaterial({
     uniforms: {
       uTime: { value: 0 },
@@ -185,6 +198,8 @@ export function createOceanMaterial(
       uCenter: { value: new THREE.Vector2(centerX, centerZ) },
       uSunDir: { value: sun.dir },
       uSunColor: { value: sun.color },
+      uDeepColor: { value: deepColor },
+      uShallowColor: { value: shallowColor },
     },
     vertexShader: /* glsl */ `
       uniform float uTime;
@@ -210,6 +225,8 @@ export function createOceanMaterial(
       uniform vec2 uCenter;
       uniform vec3 uSunDir;
       uniform vec3 uSunColor;
+      uniform vec3 uDeepColor;
+      uniform vec3 uShallowColor;
       varying vec3 vWorldPos;
       varying float vFogDepth;
 
@@ -219,12 +236,10 @@ export function createOceanMaterial(
         vec3 rippleNormal = normalize(vec3((w1 + w2) * 0.09, 1.0, (w1 - w2) * 0.09));
 
         float distFromCenter = length(vWorldPos.xz - uCenter);
-        float shoreDist = abs(distFromCenter - (uIslandRadius + 24.0));
-        float shallowMask = smoothstep(65.0, 0.0, distFromCenter - uIslandRadius);
+        float shoreDist = abs(distFromCenter - (uIslandRadius + 2.0));
+        float shallowMask = smoothstep(50.0, 0.0, distFromCenter - uIslandRadius);
 
-        vec3 deepCol = vec3(0.02, 0.38, 0.68);
-        vec3 shallowCol = vec3(0.06, 0.72, 0.85);
-        vec3 waterCol = mix(deepCol, shallowCol, shallowMask);
+        vec3 waterCol = mix(uDeepColor, uShallowColor, shallowMask);
 
         // Sunlight specular sparkle across waves
         vec3 viewDir = normalize(cameraPosition - vWorldPos);
@@ -232,10 +247,10 @@ export function createOceanMaterial(
         float sunSpec = pow(max(0.0, dot(rippleNormal, halfVec)), 96.0);
         waterCol += uSunColor * sunSpec * 0.85;
 
-        // Soft shoreline foam
-        float foamWave = sin(shoreDist * 0.42 - uTime * 2.5);
-        float foam = smoothstep(26.0, 3.0, shoreDist) * smoothstep(0.35, 0.65, foamWave + 0.3);
-        waterCol = mix(waterCol, vec3(0.92, 0.98, 1.0), foam * 0.55);
+        // Soft shoreline foam around island perimeter
+        float foamWave = sin(shoreDist * 0.55 - uTime * 2.8);
+        float foam = smoothstep(14.0, 1.5, shoreDist) * smoothstep(0.35, 0.65, foamWave + 0.3);
+        waterCol = mix(waterCol, vec3(0.92, 0.98, 1.0), foam * 0.58);
 
         // Sky Fresnel reflection
         float fresnel = pow(1.0 - max(0.0, dot(viewDir, rippleNormal)), 3.5);

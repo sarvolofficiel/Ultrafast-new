@@ -242,3 +242,70 @@ export function createNameBadgeTexture(
   tex.needsUpdate = true;
   return tex;
 }
+
+export function createArenaTexture(
+  trackId: TrackId,
+  maxAniso: number,
+): THREE.CanvasTexture {
+  const size = 256;
+  const [canvas, ctx] = makePixelCanvas(size, size);
+  const cx = size / 2;
+  const cy = size / 2;
+
+  const isNeon = trackId === 'nuit-neon';
+  const isCanyon = trackId === 'canyon-turbo';
+  const base = isNeon ? '#161a30' : isCanyon ? '#332d35' : '#2a303d';
+  const speckA = isNeon ? '#1e2442' : '#353d4d';
+  const speckB = isNeon ? '#101324' : '#202530';
+
+  ctx.fillStyle = base;
+  ctx.fillRect(0, 0, size, size);
+
+  // Pixel asphalt grain
+  for (let y = 0; y < size; y += 2) {
+    for (let x = 0; x < size; x += 2) {
+      const h = (x * 73 + y * 151 + x * y * 19) % 19;
+      if (h === 0 || h === 7) {
+        ctx.fillStyle = speckA;
+        ctx.fillRect(x, y, 2, 2);
+      } else if (h === 3 || h === 11) {
+        ctx.fillStyle = speckB;
+        ctx.fillRect(x, y, 2, 2);
+      }
+    }
+  }
+
+  // Orthogonal Sumo arena grid lines
+  ctx.strokeStyle = isNeon ? 'rgba(0, 245, 255, 0.16)' : 'rgba(255, 255, 255, 0.12)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cx, 12);
+  ctx.lineTo(cx, size - 12);
+  ctx.moveTo(12, cy);
+  ctx.lineTo(size - 12, cy);
+  ctx.stroke();
+
+  // Concentric Sumo rings
+  const rings = [
+    { r: 22, col: isNeon ? '#00f5ff' : '#ffd166', w: 3 },
+    { r: 62, col: 'rgba(255, 255, 255, 0.25)', w: 2 },
+    { r: 96, col: 'rgba(255, 190, 11, 0.35)', w: 3 },
+    { r: 118, col: isNeon ? '#ff2a85' : '#ef233c', w: 6 },
+  ];
+  for (const ring of rings) {
+    ctx.strokeStyle = ring.col;
+    ctx.lineWidth = ring.w;
+    ctx.beginPath();
+    ctx.arc(cx, cy, ring.r, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // Center sumo emblem
+  ctx.fillStyle = isNeon ? '#ff2a85' : '#ef233c';
+  ctx.beginPath();
+  ctx.arc(cx, cy, 8, 0, Math.PI * 2);
+  ctx.fill();
+
+  return finalizePixelTexture(canvas, maxAniso, 1, 1);
+}
+

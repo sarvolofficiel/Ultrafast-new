@@ -219,6 +219,51 @@ export class SoundEngine {
     });
   }
 
+  public playSplash(): void {
+    if (!this.initialized || !this.ctx || !this.masterGain) return;
+    const now = this.ctx.currentTime;
+
+    // Noise burst filtered down for water splash
+    const dur = 0.55;
+    const bufLen = Math.floor(this.ctx.sampleRate * dur);
+    const buf = this.ctx.createBuffer(1, bufLen, this.ctx.sampleRate);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < bufLen; i++) {
+      ch[i] = (Math.random() * 2 - 1) * Math.exp((-i / bufLen) * 3.5);
+    }
+
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = buf;
+
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(1600, now);
+    filter.frequency.exponentialRampToValueAtTime(220, now + dur);
+
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.36, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    noise.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    noise.start(now);
+    noise.stop(now + dur);
+
+    // Low water "plouf" thump
+    const osc = this.ctx.createOscillator();
+    const oscGain = this.ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(190, now);
+    osc.frequency.exponentialRampToValueAtTime(55, now + 0.24);
+    oscGain.gain.setValueAtTime(0.26, now);
+    oscGain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+    osc.connect(oscGain);
+    oscGain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.28);
+  }
+
   public dispose(): void {
     this.running = false;
     try {

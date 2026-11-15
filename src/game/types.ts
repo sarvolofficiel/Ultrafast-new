@@ -90,6 +90,7 @@ export interface PlayerInput {
   drift: boolean;
   boost: boolean;
   jump: boolean;
+  dash?: boolean;
   seq: number;
 }
 
@@ -110,7 +111,8 @@ export interface RacerState {
   vz: number;
   heading: number; // radians, +Z or track direction
   pitch: number; // vertical flip rotation in radians
-  airFlipAccum: number; // accumulated vertical rotation while airborne
+  yawSpin: number; // horizontal air spin rotation in radians
+  airFlipAccum: number; // accumulated flip/spin rotation while airborne
   speed: number; // scalar forward speed (m/s)
   steerAngle: number; // visual front wheel angle
   visualYawOffset: number; // drift slip angle
@@ -132,6 +134,15 @@ export interface RacerState {
   lapStartTimeMs: number;
   bestLapMs: number | null;
   lastLapMs: number | null;
+
+  // Battle Royale Sumo state
+  eliminated: boolean;
+  knockouts: number;
+  stunTimer: number;
+  lastHitBy: string | null;
+  lastHitTimeMs: number;
+  dashTimer: number;
+  dashCooldown: number;
 }
 
 export interface LobbyPlayer {
@@ -145,6 +156,34 @@ export interface LobbyPlayer {
   ready: boolean;
 }
 
+export interface CustomLevelControlPoint {
+  x: number;
+  z: number;
+}
+
+export interface CustomLevelBoostPad {
+  u?: number;
+  lateralFrac?: number;
+  x?: number;
+  z?: number;
+  heading?: number;
+}
+
+export interface CustomLevelData {
+  id: string;
+  name: string;
+  author: string;
+  biome: TrackId;
+  format: RaceFormat;
+  roadWidth: number;
+  arenaRadius: number;
+  arenaMinRadius: number;
+  controlPoints: CustomLevelControlPoint[];
+  boostPads: CustomLevelBoostPad[];
+  createdAt: number;
+  plays: number;
+}
+
 export interface LobbyConfig {
   roomCode: string;
   trackId: TrackId;
@@ -154,6 +193,7 @@ export interface LobbyConfig {
   totalLaps: number;
   fillWithAI: boolean;
   maxPlayers: number;
+  customLevel?: CustomLevelData | null;
 }
 
 export interface WorldSnapshot {
@@ -175,6 +215,7 @@ export interface WorldSnapshot {
     vz: number;
     heading: number;
     pitch: number;
+    yawSpin: number;
     speed: number;
     steerAngle: number;
     visualYawOffset: number;
@@ -192,12 +233,16 @@ export interface WorldSnapshot {
     finishTimeMs: number;
     bestLapMs: number | null;
     lastLapMs: number | null;
+    eliminated: boolean;
+    knockouts: number;
+    dashTimer: number;
   }>;
   events?: Array<{
-    type: 'collision' | 'boost' | 'lap' | 'jump';
+    type: 'collision' | 'boost' | 'lap' | 'jump' | 'splash' | 'dash';
     x: number;
     z: number;
     racerId?: string;
+    attackerId?: string;
     intensity?: number;
   }>;
 }
@@ -210,6 +255,13 @@ export interface HudTelemetry {
   rank: number;
   totalRacers: number;
   isLoop: boolean;
+  isBattleRoyale: boolean;
+  aliveCount: number;
+  knockouts: number;
+  arenaRadius: number;
+  eliminated: boolean;
+  dashCooldown: number;
+  dashActive: boolean;
   stageProgressPct: number;
   lap: number;
   totalLaps: number;
@@ -229,6 +281,7 @@ export interface HudTelemetry {
     z: number;
     color: string;
     isLocal: boolean;
+    eliminated: boolean;
   }>;
 }
 
@@ -243,4 +296,25 @@ export interface TrackMeta {
   groundColor: string;
   accentColor: string;
   roadWidth: number;
+}
+
+export interface AccountStats {
+  racesPlayed: number;
+  wins: number;
+  podiums: number;
+  brWins: number;
+  knockouts: number;
+  bestLapMs: number | null;
+}
+
+export interface DiscordAccount {
+  id: string;
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+  preferredName: string;
+  preferredColorId: CarColorId;
+  stats: AccountStats;
+  createdAt: number;
+  lastSeenAt: number;
 }

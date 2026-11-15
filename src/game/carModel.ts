@@ -40,6 +40,7 @@ export function createPixelCar(
 
   const root = new THREE.Group();
   const airPivot = new THREE.Group();
+  airPivot.rotation.order = 'YXZ';
   airPivot.position.y = 0.55;
   const carContainer = new THREE.Group();
   carContainer.position.y = -0.55;

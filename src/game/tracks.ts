@@ -1,5 +1,12 @@
 import * as THREE from 'three';
-import type { RaceFormat, RaceFormatPreference, TrackId, TrackMeta } from './types';
+import type {
+  CustomLevelControlPoint,
+  CustomLevelData,
+  RaceFormat,
+  RaceFormatPreference,
+  TrackId,
+  TrackMeta,
+} from './types';
 
 export interface BoostPad {
   segIndex: number;
@@ -26,7 +33,24 @@ export interface TrackData {
   curbWidth: number;
   wallMargin: number;
   boostPads: BoostPad[];
+  arenaInitialRadius: number;
+  arenaMinRadius: number;
   bounds: { minX: number; maxX: number; minZ: number; maxZ: number };
+}
+
+export function getBattleRoyaleArenaRadius(
+  track: TrackData,
+  raceElapsedMs: number,
+): number {
+  if (track.format !== 'battle-royale') return 0;
+  const elapsedSec = Math.max(0, raceElapsedMs / 1000);
+  const graceSec = 10;
+  if (elapsedSec <= graceSec) return track.arenaInitialRadius;
+  const shrinkSpeed = 0.55; // meters/sec
+  return Math.max(
+    track.arenaMinRadius,
+    track.arenaInitialRadius - (elapsedSec - graceSec) * shrinkSpeed,
+  );
 }
 
 export const TRACK_METAS: Record<TrackId, TrackMeta> = {
@@ -76,9 +100,11 @@ export function resolveRaceFormat(
   pref: RaceFormatPreference,
   seed: number,
 ): RaceFormat {
-  if (pref === 'sprint' || pref === 'circuit') return pref;
+  if (pref === 'sprint' || pref === 'circuit' || pref === 'battle-royale') return pref;
   const r = mulberry32(seed ^ 0x9e3779b9)();
-  return r < 0.48 ? 'sprint' : 'circuit';
+  if (r < 0.48) return 'sprint';
+  if (r < 0.82) return 'circuit';
+  return 'battle-royale';
 }
 
 function mulberry32(seed: number): () => number {
@@ -380,12 +406,40 @@ export function getTrackData(
   if (cached) return cached;
 
   const meta = TRACK_METAS[trackId];
-  const isLoop = format === 'circuit';
-  const segments = isLoop ? 640 : 680;
+  const isLoop = format === 'circuit' || format === 'battle-royale';
+  const segments = format === 'battle-royale' ? 360 : isLoop ? 640 : 680;
 
   let chosenSampled: ReturnType<typeof sampleCurve> | null = null;
 
-  {
+  const isBattleRoyale = format === 'battle-royale';
+  const arenaInitialRadius = isBattleRoyale ? 54 : 0;
+  const arenaMinRadius = isBattleRoyale ? 26 : 0;
+
+  if (isBattleRoyale) {
+    const radius = arenaInitialRadius;
+    const points: THREE.Vector3[] = [];
+    const tangents: THREE.Vector3[] = [];
+    const normals: THREE.Vector3[] = [];
+    const cumLengths: number[] = [0];
+    const segs = 360;
+    for (let i = 0; i < segs; i++) {
+      const theta = (i / segs) * Math.PI * 2;
+      const x = Math.sin(theta) * radius;
+      const z = Math.cos(theta) * radius;
+      points.push(new THREE.Vector3(x, 0, z));
+      const nextTheta = ((i + 1) / segs) * Math.PI * 2;
+      const nx = Math.sin(nextTheta) * radius;
+      const nz = Math.cos(nextTheta) * radius;
+      const t = new THREE.Vector3(nx - x, 0, nz - z).normalize();
+      tangents.push(t);
+      normals.push(new THREE.Vector3(-t.z, 0, t.x).normalize());
+      if (i > 0) {
+        cumLengths.push(cumLengths[i - 1] + points[i].distanceTo(points[i - 1]));
+      }
+    }
+    const totalLength = cumLengths[segs - 1] + points[0].distanceTo(points[segs - 1]);
+    chosenSampled = { points, tangents, normals, cumLengths, totalLength };
+  } else {
     for (let attempt = 0; attempt < 32; attempt++) {
       const attemptSeed = safeSeed + attempt * 7919;
       const rawPts = isLoop
@@ -456,14 +510,30 @@ export function getTrackData(
   const curbWidth = 1.6;
   const wallMargin = halfWidth + curbWidth + 5.2;
 
-  const boostPads = computeLogicalBoostPads(
-    chosenSampled,
-    isLoop,
-    startSegIndex,
-    finishSegIndex,
-    halfWidth,
-    safeSeed,
-  );
+  const boostPads: BoostPad[] = isBattleRoyale
+    ? [0, 1, 2, 3].map((k) => {
+        const ang = (k / 4) * Math.PI * 2 + Math.PI / 4;
+        const padR = 16;
+        const x = Math.sin(ang) * padR;
+        const z = Math.cos(ang) * padR;
+        // Tangential + slight inward angle for aggressive arena turns
+        const heading = ang + Math.PI * 0.6;
+        return {
+          segIndex: k * 90,
+          lateralOffset: 0,
+          x,
+          z,
+          heading,
+        };
+      })
+    : computeLogicalBoostPads(
+        chosenSampled,
+        isLoop,
+        startSegIndex,
+        finishSegIndex,
+        halfWidth,
+        safeSeed,
+      );
 
   const data: TrackData = {
     meta,
@@ -482,12 +552,16 @@ export function getTrackData(
     curbWidth,
     wallMargin,
     boostPads,
-    bounds: {
-      minX: minX - 55,
-      maxX: maxX + 55,
-      minZ: minZ - 55,
-      maxZ: maxZ + 55,
-    },
+    arenaInitialRadius,
+    arenaMinRadius,
+    bounds: isBattleRoyale
+      ? { minX: -66, maxX: 66, minZ: -66, maxZ: 66 }
+      : {
+          minX: minX - 55,
+          maxX: maxX + 55,
+          minZ: minZ - 55,
+          maxZ: maxZ + 55,
+        },
   };
 
   if (trackCache.size >= 16) {
@@ -595,12 +669,343 @@ export function projectOntoTrack(
   };
 }
 
+export function buildCustomTrackData(level: CustomLevelData): TrackData {
+  const baseMeta = TRACK_METAS[level.biome] ?? TRACK_METAS['baie-pixel'];
+  const roadWidth = clamp(level.roadWidth || baseMeta.roadWidth, 14, 26);
+  const meta: TrackMeta = {
+    ...baseMeta,
+    name: level.name || baseMeta.name,
+    roadWidth,
+  };
+
+  const format: RaceFormat = level.format;
+  const isBattleRoyale = format === 'battle-royale';
+  const isLoop = format === 'circuit' || isBattleRoyale;
+  const segments = isBattleRoyale ? 360 : isLoop ? 640 : 680;
+  const arenaInitialRadius = isBattleRoyale ? clamp(level.arenaRadius || 54, 38, 72) : 0;
+  const arenaMinRadius = isBattleRoyale
+    ? clamp(level.arenaMinRadius || 26, 18, arenaInitialRadius - 10)
+    : 0;
+
+  let chosenSampled: ReturnType<typeof sampleCurve>;
+
+  if (isBattleRoyale) {
+    const radius = arenaInitialRadius;
+    const points: THREE.Vector3[] = [];
+    const tangents: THREE.Vector3[] = [];
+    const normals: THREE.Vector3[] = [];
+    const cumLengths: number[] = [0];
+    const segs = 360;
+    for (let i = 0; i < segs; i++) {
+      const theta = (i / segs) * Math.PI * 2;
+      const x = Math.sin(theta) * radius;
+      const z = Math.cos(theta) * radius;
+      points.push(new THREE.Vector3(x, 0, z));
+      const nextTheta = ((i + 1) / segs) * Math.PI * 2;
+      const nx = Math.sin(nextTheta) * radius;
+      const nz = Math.cos(nextTheta) * radius;
+      const t = new THREE.Vector3(nx - x, 0, nz - z).normalize();
+      tangents.push(t);
+      normals.push(new THREE.Vector3(-t.z, 0, t.x).normalize());
+      if (i > 0) {
+        cumLengths.push(cumLengths[i - 1] + points[i].distanceTo(points[i - 1]));
+      }
+    }
+    const totalLength = cumLengths[segs - 1] + points[0].distanceTo(points[segs - 1]);
+    chosenSampled = { points, tangents, normals, cumLengths, totalLength };
+  } else {
+    const rawPts =
+      level.controlPoints.length >= 4
+        ? level.controlPoints.map((p) => new THREE.Vector3(p.x, 0, p.z))
+        : buildCircuitControlPoints(104729);
+    chosenSampled = sampleCurve(rawPts, isLoop, segments);
+  }
+
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minZ = Infinity;
+  let maxZ = -Infinity;
+  for (const p of chosenSampled.points) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.z < minZ) minZ = p.z;
+    if (p.z > maxZ) maxZ = p.z;
+  }
+
+  const startSegIndex = isLoop ? 0 : 24;
+  const finishSegIndex = isLoop ? 0 : segments - 20;
+  const halfWidth = roadWidth / 2;
+  const curbWidth = 1.6;
+  const wallMargin = halfWidth + curbWidth + 5.2;
+
+  const boostPads: BoostPad[] = isBattleRoyale
+    ? (level.boostPads.length > 0
+        ? level.boostPads
+            .filter((bp) => typeof bp.x === 'number' && typeof bp.z === 'number')
+            .map((bp, idx) => {
+              const px = bp.x ?? 0;
+              const pz = bp.z ?? 0;
+              const dist = Math.hypot(px, pz);
+              const maxR = Math.max(8, arenaInitialRadius - 6);
+              const s = dist > maxR ? maxR / dist : 1;
+              const fx = px * s;
+              const fz = pz * s;
+              const ang = Math.atan2(fx, fz);
+              return {
+                segIndex: idx * 30,
+                lateralOffset: 0,
+                x: fx,
+                z: fz,
+                heading: typeof bp.heading === 'number' ? bp.heading : ang + Math.PI * 0.6,
+              };
+            })
+        : [0, 1, 2, 3].map((k) => {
+            const ang = (k / 4) * Math.PI * 2 + Math.PI / 4;
+            const padR = Math.min(18, arenaInitialRadius * 0.34);
+            const x = Math.sin(ang) * padR;
+            const z = Math.cos(ang) * padR;
+            return {
+              segIndex: k * 90,
+              lateralOffset: 0,
+              x,
+              z,
+              heading: ang + Math.PI * 0.6,
+            };
+          }))
+    : level.boostPads.map((bp) => {
+        const u = clamp(bp.u ?? 0.25, 0.05, 0.94);
+        const segIndex = Math.max(
+          isLoop ? 12 : startSegIndex + 12,
+          Math.min(isLoop ? segments - 12 : finishSegIndex - 12, Math.floor(u * segments)),
+        );
+        const p = chosenSampled.points[segIndex];
+        const n = chosenSampled.normals[segIndex];
+        const t = chosenSampled.tangents[segIndex];
+        const lat = clamp(bp.lateralFrac ?? 0, -0.65, 0.65) * halfWidth;
+        return {
+          segIndex,
+          lateralOffset: lat,
+          x: p.x + n.x * lat,
+          z: p.z + n.z * lat,
+          heading: Math.atan2(t.x, t.z),
+        };
+      });
+
+  const arenaBound = arenaInitialRadius + 14;
+  return {
+    meta,
+    seed: level.createdAt || 1,
+    format,
+    isLoop,
+    startSegIndex,
+    finishSegIndex,
+    segments,
+    points: chosenSampled.points,
+    tangents: chosenSampled.tangents,
+    normals: chosenSampled.normals,
+    cumLengths: chosenSampled.cumLengths,
+    totalLength: chosenSampled.totalLength,
+    halfWidth,
+    curbWidth,
+    wallMargin,
+    boostPads,
+    arenaInitialRadius,
+    arenaMinRadius,
+    bounds: isBattleRoyale
+      ? { minX: -arenaBound, maxX: arenaBound, minZ: -arenaBound, maxZ: arenaBound }
+      : {
+          minX: minX - 55,
+          maxX: maxX + 55,
+          minZ: minZ - 55,
+          maxZ: maxZ + 55,
+        },
+  };
+}
+
+export function validateCustomTrack(level: CustomLevelData): {
+  valid: boolean;
+  reason?: string;
+  lengthMeters: number;
+  sampledPoints: Array<{ x: number; z: number }>;
+} {
+  if (level.format === 'battle-royale') {
+    const r = clamp(level.arenaRadius || 54, 38, 72);
+    return {
+      valid: true,
+      lengthMeters: Math.round(r * 2 * Math.PI),
+      sampledPoints: [],
+    };
+  }
+
+  if (level.controlPoints.length < 4) {
+    return {
+      valid: false,
+      reason: 'Ajoutez au moins 4 points de tracé.',
+      lengthMeters: 0,
+      sampledPoints: level.controlPoints.map((p) => ({ x: p.x, z: p.z })),
+    };
+  }
+
+  const isLoop = level.format === 'circuit';
+  const segs = isLoop ? 260 : 280;
+  const rawPts = level.controlPoints.map((p) => new THREE.Vector3(p.x, 0, p.z));
+  const sampled = sampleCurve(rawPts, isLoop, segs);
+  const sampledPoints = sampled.points.map((p) => ({ x: p.x, z: p.z }));
+  const lengthMeters = Math.round(sampled.totalLength);
+
+  if (sampled.totalLength < 340) {
+    return {
+      valid: false,
+      reason: `Tracé trop court (${lengthMeters}m). Minimum 340m.`,
+      lengthMeters,
+      sampledPoints,
+    };
+  }
+  if (sampled.totalLength > 6200) {
+    return {
+      valid: false,
+      reason: `Tracé trop long (${lengthMeters}m). Maximum 6200m.`,
+      lengthMeters,
+      sampledPoints,
+    };
+  }
+
+  const minClearanceSq = (level.roadWidth * 1.45) ** 2;
+  const minArcGap = 24;
+  for (let i = 0; i < segs; i += 2) {
+    const pi = sampled.points[i];
+    for (let j = i + minArcGap; j < segs; j += 2) {
+      if (isLoop && segs - (j - i) < minArcGap) continue;
+      const pj = sampled.points[j];
+      const dx = pi.x - pj.x;
+      const dz = pi.z - pj.z;
+      if (dx * dx + dz * dz < minClearanceSq) {
+        return {
+          valid: false,
+          reason: 'Deux portions de route sont trop proches ou se croisent.',
+          lengthMeters,
+          sampledPoints,
+        };
+      }
+    }
+  }
+
+  return { valid: true, lengthMeters, sampledPoints };
+}
+
+export function generateTemplateControlPoints(
+  template: 'oval' | 'gp' | 'serpent' | 'technique',
+  format: RaceFormat,
+): CustomLevelControlPoint[] {
+  if (format === 'sprint') {
+    if (template === 'serpent') {
+      return [
+        { x: 0, z: 60 },
+        { x: 0, z: -80 },
+        { x: 110, z: -210 },
+        { x: -110, z: -360 },
+        { x: 120, z: -510 },
+        { x: -90, z: -670 },
+        { x: 70, z: -830 },
+        { x: 0, z: -980 },
+      ];
+    }
+    if (template === 'technique') {
+      return [
+        { x: 0, z: 60 },
+        { x: 0, z: -70 },
+        { x: 140, z: -150 },
+        { x: 170, z: -310 },
+        { x: 20, z: -380 },
+        { x: -120, z: -500 },
+        { x: -60, z: -680 },
+        { x: 120, z: -790 },
+        { x: 120, z: -950 },
+      ];
+    }
+    // oval / gp sprint default
+    return [
+      { x: 0, z: 60 },
+      { x: 0, z: -90 },
+      { x: 75, z: -240 },
+      { x: 195, z: -360 },
+      { x: 150, z: -540 },
+      { x: 35, z: -690 },
+      { x: 115, z: -860 },
+      { x: 115, z: -1020 },
+    ];
+  }
+
+  if (template === 'oval') {
+    return [
+      { x: 0, z: 80 },
+      { x: 0, z: -80 },
+      { x: 95, z: -210 },
+      { x: 240, z: -210 },
+      { x: 335, z: -80 },
+      { x: 335, z: 80 },
+      { x: 240, z: 210 },
+      { x: 95, z: 210 },
+    ];
+  }
+
+  if (template === 'serpent') {
+    return [
+      { x: 0, z: 75 },
+      { x: 0, z: -75 },
+      { x: 90, z: -210 },
+      { x: 230, z: -175 },
+      { x: 290, z: -290 },
+      { x: 420, z: -240 },
+      { x: 460, z: -40 },
+      { x: 320, z: 120 },
+      { x: 210, z: 45 },
+      { x: 130, z: 195 },
+    ];
+  }
+
+  if (template === 'technique') {
+    return [
+      { x: 0, z: 70 },
+      { x: 0, z: -75 },
+      { x: 110, z: -165 },
+      { x: 65, z: -290 },
+      { x: 210, z: -355 },
+      { x: 365, z: -245 },
+      { x: 310, z: -75 },
+      { x: 410, z: 70 },
+      { x: 290, z: 215 },
+      { x: 115, z: 175 },
+    ];
+  }
+
+  // 'gp' Grand Prix loop
+  return [
+    { x: 0, z: 75 },
+    { x: 0, z: -85 },
+    { x: 70, z: -230 },
+    { x: 225, z: -265 },
+    { x: 360, z: -155 },
+    { x: 320, z: 25 },
+    { x: 415, z: 160 },
+    { x: 280, z: 265 },
+    { x: 110, z: 215 },
+  ];
+}
+
 export function getSpawnTransform(
   track: TrackData,
   slotIndex: number,
   totalRacers = 8,
 ): { x: number; z: number; heading: number; segIndex: number } {
-
+  if (track.format === 'battle-royale') {
+    const angle = (slotIndex / Math.max(1, totalRacers)) * Math.PI * 2;
+    const spawnRadius = Math.min(34, (track.arenaInitialRadius || 54) * 0.64);
+    const x = Math.sin(angle) * spawnRadius;
+    const z = Math.cos(angle) * spawnRadius;
+    const heading = Math.atan2(-x, -z);
+    return { x, z, heading, segIndex: Math.floor((slotIndex / Math.max(1, totalRacers)) * track.segments) };
+  }
 
   const row = Math.floor(slotIndex / 2);
   const col = slotIndex % 2;

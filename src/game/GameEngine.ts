@@ -19,9 +19,16 @@ import {
 } from './physics';
 import { getTrackSunConfig, SunLightPostShader } from './shaders';
 import { createContactShadowTexture } from './textures';
-import { getTrackData, TRACK_METAS, type TrackData } from './tracks';
+import {
+  buildCustomTrackData,
+  getBattleRoyaleArenaRadius,
+  getTrackData,
+  TRACK_METAS,
+  type TrackData,
+} from './tracks';
 import type {
   CarColorId,
+  CustomLevelData,
   GamePhase,
   HudTelemetry,
   NetworkRole,
@@ -110,6 +117,7 @@ export class GameEngine {
   private netSendAccum = 0;
   private hudAccum = 0;
   private hitstopTimer = 0;
+  private finishDelayTimer = 0;
   private cameraShake = 0;
   private bannerText: string | null = null;
   private bannerTimer = 0;
@@ -127,7 +135,9 @@ export class GameEngine {
     drift: false,
     boost: false,
     jump: false,
+    dash: false,
   };
+  private queuedMouseDash = false;
 
   // Loop management
   private frameId = 0;
@@ -139,6 +149,12 @@ export class GameEngine {
   private showcaseAngle = 0.5;
   private isDragging = false;
   private lastPointerX = 0;
+  private activeCustomLevelKey = '';
+  private camRoll = 0;
+  private landingDip = 0;
+  private wasFocusAirborne = false;
+  private boostKick = 0;
+  private prevFocusBoosting = false;
 
   constructor(
     container: HTMLElement,
@@ -294,6 +310,7 @@ export class GameEngine {
       drift: boolean;
       boost: boolean;
       jump: boolean;
+      dash: boolean;
     }>,
   ): void {
     Object.assign(this.touchControls, partial);
@@ -303,15 +320,27 @@ export class GameEngine {
     trackId: TrackId,
     mapSeed = 104729,
     raceFormat: RaceFormat = 'sprint',
+    customLevel?: CustomLevelData | null,
   ): void {
+    const customKey = customLevel
+      ? `${customLevel.id}:${customLevel.createdAt}:${customLevel.controlPoints.length}:${customLevel.boostPads.length}:${customLevel.roadWidth}:${customLevel.arenaRadius}`
+      : '';
+    const effectiveTrackId = customLevel ? customLevel.biome : trackId;
+    const effectiveFormat = customLevel ? customLevel.format : raceFormat;
+
     if (
       this.world &&
-      this.track.meta.id === trackId &&
-      this.track.seed === mapSeed &&
-      this.track.format === raceFormat
+      this.activeCustomLevelKey === customKey &&
+      (customLevel
+        ? true
+        : this.track.meta.id === effectiveTrackId &&
+          this.track.seed === mapSeed &&
+          this.track.format === effectiveFormat)
     ) {
       return;
     }
+
+    this.activeCustomLevelKey = customKey;
 
     if (this.world) {
       this.scene.remove(this.world.group);
@@ -319,13 +348,18 @@ export class GameEngine {
       this.world = null;
     }
 
-    this.track = getTrackData(trackId, mapSeed, raceFormat);
-    const meta = TRACK_METAS[trackId];
+    this.track = customLevel
+      ? buildCustomTrackData(customLevel)
+      : getTrackData(effectiveTrackId, mapSeed, effectiveFormat);
+    const meta = TRACK_METAS[effectiveTrackId];
 
     _skyTop.set(meta.skyTop);
     _skyBot.set(meta.skyBottom);
     this.scene.background = _skyBot.clone();
-    this.scene.fog = new THREE.FogExp2(meta.fogColor, trackId === 'nuit-neon' ? 0.0042 : 0.003);
+    this.scene.fog = new THREE.FogExp2(
+      meta.fogColor,
+      effectiveTrackId === 'nuit-neon' ? 0.0042 : 0.003,
+    );
 
     const sun = getTrackSunConfig(trackId);
     if (trackId === 'nuit-neon') {
@@ -357,6 +391,16 @@ export class GameEngine {
     this.scene.add(this.world.group);
 
     if (this.showcaseCar) {
+      this.positionShowcaseCar();
+    }
+  }
+
+  private positionShowcaseCar(): void {
+    if (!this.showcaseCar) return;
+    if (this.track.format === 'battle-royale') {
+      this.showcaseCar.root.position.set(0, 0, 0);
+      this.showcaseCar.root.rotation.y = 0;
+    } else {
       const p = this.track.points[this.track.startSegIndex];
       const t = this.track.tangents[this.track.startSegIndex];
       this.showcaseCar.root.position.set(p.x + t.x * 7, 0, p.z + t.z * 7);
@@ -382,10 +426,7 @@ export class GameEngine {
       maxAniso,
       this.track.meta.id,
     );
-    const p = this.track.points[this.track.startSegIndex];
-    const t = this.track.tangents[this.track.startSegIndex];
-    this.showcaseCar.root.position.set(p.x + t.x * 7, 0, p.z + t.z * 7);
-    this.showcaseCar.root.rotation.y = Math.atan2(t.x, t.z);
+    this.positionShowcaseCar();
     this.showcaseCar.root.visible = this.phase === 'title' || this.phase === 'lobby';
     this.scene.add(this.showcaseCar.root);
   }
@@ -408,9 +449,7 @@ export class GameEngine {
     this.sound.updateEngine(0, false, false, false);
     this.setupShowcaseCar(colorId);
     if (this.showcaseCar) {
-      const p = this.track.points[this.track.startSegIndex];
-      const t = this.track.tangents[this.track.startSegIndex];
-      this.showcaseCar.root.position.set(p.x + t.x * 7, 0, p.z + t.z * 7);
+      this.positionShowcaseCar();
       this.showcaseCar.root.visible = true;
     }
     this.callbacks.onPhaseChange('title');
@@ -421,6 +460,7 @@ export class GameEngine {
     colorId: CarColorId,
     mapSeed?: number,
     raceFormat?: RaceFormat,
+    customLevel?: CustomLevelData | null,
   ): void {
     const alreadyInLobby = this.phase === 'lobby';
     if (!alreadyInLobby) {
@@ -430,20 +470,10 @@ export class GameEngine {
     }
     const targetSeed = mapSeed ?? this.track.seed;
     const targetFormat = raceFormat ?? this.track.format;
-    if (
-      this.track.meta.id !== trackId ||
-      this.track.seed !== targetSeed ||
-      this.track.format !== targetFormat
-    ) {
-      this.loadWorld(trackId, targetSeed, targetFormat);
-      this.setupShowcaseCar(colorId);
-    } else if (!alreadyInLobby || !this.showcaseCar) {
-      this.setupShowcaseCar(colorId);
-    }
+    this.loadWorld(trackId, targetSeed, targetFormat, customLevel);
+    this.setupShowcaseCar(colorId);
     if (this.showcaseCar) {
-      const p = this.track.points[this.track.startSegIndex];
-      const t = this.track.tangents[this.track.startSegIndex];
-      this.showcaseCar.root.position.set(p.x + t.x * 7, 0, p.z + t.z * 7);
+      this.positionShowcaseCar();
       this.showcaseCar.root.visible = true;
     }
     if (!alreadyInLobby) {
@@ -458,6 +488,7 @@ export class GameEngine {
     totalLaps: number;
     role: NetworkRole;
     localId: string;
+    customLevel?: CustomLevelData | null;
     participants: Array<{
       id: string;
       name: string;
@@ -471,11 +502,22 @@ export class GameEngine {
       this.showcaseCar.root.visible = false;
     }
 
-    this.loadWorld(options.trackId, options.mapSeed, options.raceFormat);
+    this.loadWorld(
+      options.trackId,
+      options.mapSeed,
+      options.raceFormat,
+      options.customLevel,
+    );
 
     this.role = options.role;
     this.localPlayerId = options.localId;
-    this.totalLaps = options.raceFormat === 'sprint' ? 1 : options.totalLaps;
+    const effectiveFormat = options.customLevel ? options.customLevel.format : options.raceFormat;
+    this.totalLaps = effectiveFormat === 'sprint' ? 1 : options.totalLaps;
+    this.camRoll = 0;
+    this.landingDip = 0;
+    this.wasFocusAirborne = false;
+    this.boostKick = 0;
+    this.prevFocusBoosting = false;
 
     this.racers = createInitialRacers(
       this.track,
@@ -517,9 +559,11 @@ export class GameEngine {
     this.lastCountdownInt = 4;
     this.simTick = 0;
     this.hitstopTimer = 0;
+    this.finishDelayTimer = 0;
     this.cameraShake = 0;
     this.bannerText = null;
     this.bannerTimer = 0;
+    this.queuedMouseDash = false;
     this.remoteInputs.clear();
 
     this.setPhase('countdown');
@@ -588,6 +632,7 @@ export class GameEngine {
         localR.vz = sr.vz;
         localR.heading = lerpAngle(localR.heading, sr.heading, 0.45);
         localR.pitch = lerpAngle(localR.pitch, sr.pitch, 0.55);
+        localR.yawSpin = lerpAngle(localR.yawSpin, sr.yawSpin, 0.55);
         localR.speed = sr.speed;
         localR.steerAngle = sr.steerAngle;
         localR.visualYawOffset = sr.visualYawOffset;
@@ -605,6 +650,9 @@ export class GameEngine {
         localR.finishTimeMs = sr.finishTimeMs;
         localR.bestLapMs = sr.bestLapMs;
         localR.lastLapMs = sr.lastLapMs;
+        localR.eliminated = sr.eliminated;
+        localR.knockouts = sr.knockouts;
+        localR.dashTimer = sr.dashTimer;
       }
     }
 
@@ -615,8 +663,8 @@ export class GameEngine {
     }
 
     const me = this.racers.find((r) => r.id === this.localPlayerId);
-    if (me && me.finished && this.phase !== 'finished') {
-      this.phase = 'finished';
+    if (me && me.finished && this.phase === 'racing' && this.track.format !== 'battle-royale') {
+      this.setPhase('finished');
       this.sound.playLapChime(true);
       this.callbacks.onPhaseChange('finished');
       this.callbacks.onRaceFinished([...this.racers]);
@@ -656,6 +704,8 @@ export class GameEngine {
       this.touchControls.drift;
     const boost = k.has('KeyF') || k.has('KeyB') || this.touchControls.boost;
     const jump = k.has('KeyE') || this.touchControls.jump;
+    const dash = this.queuedMouseDash || this.touchControls.dash;
+    this.queuedMouseDash = false;
 
     return {
       throttle,
@@ -664,6 +714,7 @@ export class GameEngine {
       drift,
       boost,
       jump,
+      dash,
       seq: ++this.localInputSeq,
     };
   }
@@ -690,14 +741,40 @@ export class GameEngine {
   }
 
   private triggerEventEffects(ev: {
-    type: 'collision' | 'boost' | 'lap' | 'jump';
+    type: 'collision' | 'boost' | 'lap' | 'jump' | 'splash' | 'dash';
     x: number;
     z: number;
     racerId?: string;
+    attackerId?: string;
     intensity?: number;
   }): void {
     const isMe = ev.racerId === this.localPlayerId;
-    if (ev.type === 'jump') {
+    if (ev.type === 'dash') {
+      this.particles.spawnBurst(ev.x, 0.5, ev.z, 18, 0xffbe0b, 10);
+      this.particles.spawnBurst(ev.x, 0.5, ev.z, 10, 0x00f5ff, 8);
+      if (isMe) {
+        this.sound.playBoost();
+        this.cameraShake = 0.22;
+        this.bannerText = 'CHARGE SUMO !';
+        this.bannerTimer = 0.7;
+      }
+    } else if (ev.type === 'splash') {
+      this.particles.spawnBurst(ev.x, -1.4, ev.z, 24, 0x38bdf8, 12);
+      this.particles.spawnBurst(ev.x, -1.3, ev.z, 12, 0xffffff, 8);
+      this.sound.playSplash();
+      const victim = this.racers.find((r) => r.id === ev.racerId);
+      if (isMe) {
+        this.cameraShake = 0.55;
+        this.bannerText = 'PLOUF ! ÉLIMINÉ !';
+        this.bannerTimer = 1.4;
+      } else if (ev.attackerId === this.localPlayerId) {
+        this.bannerText = victim ? `KO ! ${victim.name} À L'EAU !` : 'KO !';
+        this.bannerTimer = 1.5;
+      } else {
+        this.bannerText = victim ? `${victim.name} À L'EAU !` : 'PLOUF !';
+        this.bannerTimer = 1.1;
+      }
+    } else if (ev.type === 'jump') {
       this.particles.spawnBurst(ev.x, 0.2, ev.z, 8, 0xe2e8f0, 6);
       if (isMe) {
         this.sound.playJump();
@@ -769,12 +846,22 @@ export class GameEngine {
     }
 
     if (this.phase === 'title' || this.phase === 'lobby') {
+      this.showcaseAngle += dt * 0.22;
+      if (Math.abs(this.camera.fov - 62) > 0.1) {
+        this.camera.fov = THREE.MathUtils.damp(this.camera.fov, 62, 8, dt);
+        this.camera.updateProjectionMatrix();
+      }
       if (this.showcaseCar) {
         const p = this.showcaseCar.root.position;
-        // Static side view framing (no camera rotation blocking UI touches)
-        _camTargetPos.set(p.x - 7.5, p.y + 1.35, p.z + 4.2);
+        const orbitRadius = 8.4;
+        const camY = p.y + 1.9 + Math.sin(this.showcaseAngle * 0.65) * 0.22;
+        _camTargetPos.set(
+          p.x + Math.sin(this.showcaseAngle) * orbitRadius,
+          camY,
+          p.z + Math.cos(this.showcaseAngle) * orbitRadius,
+        );
         this.camera.position.copy(_camTargetPos);
-        _camLookTarget.set(p.x, p.y + 0.75, p.z);
+        _camLookTarget.set(p.x, p.y + 0.72, p.z);
         this.camera.lookAt(_camLookTarget);
         const sun = getTrackSunConfig(this.track.meta.id);
         this.keyLight.position.set(
@@ -850,9 +937,28 @@ export class GameEngine {
 
       const me = this.racers.find((r) => r.id === this.localPlayerId);
       if (me && me.finished && this.phase === 'racing') {
-        this.setPhase('finished');
-        this.callbacks.onPhaseChange('finished');
-        this.callbacks.onRaceFinished([...this.racers]);
+        if (this.track.format === 'battle-royale') {
+          if (this.finishDelayTimer === 0) {
+            this.finishDelayTimer = me.eliminated ? 0.9 : 0.65;
+            if (!me.eliminated) {
+              this.bannerText = 'VICTOIRE ROYALE !';
+              this.bannerTimer = 1.6;
+              this.sound.playLapChime(true);
+            }
+          } else if (this.finishDelayTimer > 0) {
+            this.finishDelayTimer -= dt;
+            if (this.finishDelayTimer <= 0) {
+              this.finishDelayTimer = -1;
+              this.setPhase('finished');
+              this.callbacks.onPhaseChange('finished');
+              this.callbacks.onRaceFinished([...this.racers]);
+            }
+          }
+        } else {
+          this.setPhase('finished');
+          this.callbacks.onPhaseChange('finished');
+          this.callbacks.onRaceFinished([...this.racers]);
+        }
       }
 
       // Broadcast snapshot from Host's PC to all connected clients at 30Hz
@@ -885,6 +991,7 @@ export class GameEngine {
       }
       if (this.phase === 'racing' || this.phase === 'finished') {
         for (const r of this.racers) {
+          if (r.eliminated) continue;
           r.x += r.vx * dt;
           r.z += r.vz * dt;
           if (r.y > 0 || r.vy > 0) {
@@ -893,7 +1000,31 @@ export class GameEngine {
           }
         }
       }
+      const me = this.racers.find((r) => r.id === this.localPlayerId);
+      if (me && me.finished && this.phase === 'racing' && this.track.format === 'battle-royale') {
+        if (this.finishDelayTimer === 0) {
+          this.finishDelayTimer = me.eliminated ? 0.9 : 0.65;
+          if (!me.eliminated) {
+            this.bannerText = 'VICTOIRE ROYALE !';
+            this.bannerTimer = 1.6;
+            this.sound.playLapChime(true);
+          }
+        } else if (this.finishDelayTimer > 0) {
+          this.finishDelayTimer -= dt;
+          if (this.finishDelayTimer <= 0) {
+            this.finishDelayTimer = -1;
+            this.setPhase('finished');
+            this.callbacks.onPhaseChange('finished');
+            this.callbacks.onRaceFinished([...this.racers]);
+          }
+        }
+      }
     }
+
+    const isBR = this.track.format === 'battle-royale';
+    const currentArenaRadius = isBR
+      ? getBattleRoyaleArenaRadius(this.track, this.raceElapsedMs)
+      : 0;
 
     // Update 3D car meshes, wheels, flames & particles
     for (const r of this.racers) {
@@ -904,11 +1035,14 @@ export class GameEngine {
       car.root.rotation.y = r.heading + r.visualYawOffset;
       car.airPivot.position.y = 0.55 + r.y;
       car.airPivot.rotation.x = r.pitch;
+      car.airPivot.rotation.y = r.yawSpin;
 
-      const shadowScale = 1 / (1 + r.y * 0.14);
+      const overWater = isBR && (Math.hypot(r.x, r.z) > currentArenaRadius || r.y < -0.05);
+      car.shadowMesh.visible = !overWater;
+      const shadowScale = 1 / (1 + Math.max(0, r.y) * 0.14);
       car.shadowMesh.scale.set(shadowScale, shadowScale, 1);
       (car.shadowMesh.material as THREE.MeshBasicMaterial).opacity =
-        0.65 / (1 + r.y * 0.18);
+        0.65 / (1 + Math.max(0, r.y) * 0.18);
 
       // Subtle suspension lean into turns
       const targetRoll = -r.steerAngle * Math.min(1, Math.abs(r.speed) / 40) * 0.14;
@@ -929,7 +1063,7 @@ export class GameEngine {
 
       // Brake lights & nitro flames
       car.brakeLightsMat.emissiveIntensity = r.braking ? 2.8 : 0.6;
-      const boosting = r.boostTimer > 0;
+      const boosting = r.boostTimer > 0 && !r.eliminated;
       car.flameLeft.visible = boosting;
       car.flameRight.visible = boosting;
       if (boosting) {
@@ -941,7 +1075,7 @@ export class GameEngine {
       // Drift sparks & off-road dust particles
       const sinH = Math.sin(r.heading);
       const cosH = Math.cos(r.heading);
-      if (r.y <= 0.08 && r.driftDir !== 0 && r.speed > 14 && Math.random() < 0.75) {
+      if (!r.eliminated && r.y >= -0.05 && r.y <= 0.08 && r.driftDir !== 0 && r.speed > 14 && Math.random() < 0.75) {
         const sparkCol =
           r.driftCharge >= 2.2
             ? 0xff2a85
@@ -959,7 +1093,7 @@ export class GameEngine {
           0.85,
           0.26,
         );
-      } else if (r.y <= 0.08 && r.offRoad && Math.abs(r.speed) > 12 && Math.random() < 0.45) {
+      } else if (!isBR && r.y <= 0.08 && r.offRoad && Math.abs(r.speed) > 12 && Math.random() < 0.45) {
         const dustCol =
           this.track.meta.id === 'canyon-turbo' ? 0xd98a5f : 0xcbd5e1;
         this.particles.spawn(
@@ -978,12 +1112,38 @@ export class GameEngine {
 
     this.particles.update(dt);
 
-    // Chase camera with exponential damping, speed FOV punch, & collision shake
+    // Immersive chase camera: corner banking, apex look-ahead, boost kick, landing dip & road rumble
     const focus = this.racers.find((r) => r.isLocal) ?? this.racers[0];
     if (focus) {
+      const refSpeed = isBR ? 28 : 58;
+      const speedRatio = Math.min(1.35, Math.abs(focus.speed) / refSpeed);
+      const isBoosting = (focus.boostTimer > 0 || focus.dashTimer > 0) && !focus.eliminated;
+
+      if (this.wasFocusAirborne && focus.y <= 0.03) {
+        this.landingDip = 0.34;
+        this.cameraShake = Math.max(this.cameraShake, 0.16);
+      }
+      this.wasFocusAirborne = focus.y > 0.12;
+
+      if (!this.prevFocusBoosting && isBoosting) {
+        this.boostKick = 1.0;
+      }
+      this.prevFocusBoosting = isBoosting;
+
+      this.landingDip = THREE.MathUtils.damp(this.landingDip, 0, 10, dt);
+      this.boostKick = THREE.MathUtils.damp(this.boostKick, 0, 5.5, dt);
+
       const camHeading = focus.heading + focus.visualYawOffset * 0.35;
-      const dist = focus.boostTimer > 0 ? 11.4 : 9.8;
-      const height = 4.4 + focus.y * 0.72;
+      const dist =
+        9.1 - speedRatio * 0.45 + (focus.boostTimer > 0 ? 1.55 : 0) + this.boostKick * 0.9;
+      const height = Math.max(
+        2.3,
+        4.05 + focus.y * 0.72 - speedRatio * 0.24 - this.landingDip,
+      );
+
+      const rightX = Math.cos(focus.heading);
+      const rightZ = -Math.sin(focus.heading);
+      const apexOffset = -focus.steerAngle * speedRatio * 1.6;
 
       _camTargetPos.set(
         focus.x - Math.sin(camHeading) * dist,
@@ -991,28 +1151,45 @@ export class GameEngine {
         focus.z - Math.cos(camHeading) * dist,
       );
       _camLookTarget.set(
-        focus.x + Math.sin(focus.heading) * 6,
-        1.25 + focus.y * 0.85,
-        focus.z + Math.cos(focus.heading) * 6,
+        focus.x + Math.sin(focus.heading) * 6.5 + rightX * apexOffset,
+        Math.max(-1.0, 1.25 + focus.y * 0.85 - this.landingDip * 0.45),
+        focus.z + Math.cos(focus.heading) * 6.5 + rightZ * apexOffset,
       );
 
-      this.camPos.x = THREE.MathUtils.damp(this.camPos.x, _camTargetPos.x, 9, dt);
-      this.camPos.y = THREE.MathUtils.damp(this.camPos.y, _camTargetPos.y, 9, dt);
-      this.camPos.z = THREE.MathUtils.damp(this.camPos.z, _camTargetPos.z, 9, dt);
+      this.camPos.x = THREE.MathUtils.damp(this.camPos.x, _camTargetPos.x, 9.5, dt);
+      this.camPos.y = THREE.MathUtils.damp(this.camPos.y, _camTargetPos.y, 9.5, dt);
+      this.camPos.z = THREE.MathUtils.damp(this.camPos.z, _camTargetPos.z, 9.5, dt);
 
-      this.camLook.x = THREE.MathUtils.damp(this.camLook.x, _camLookTarget.x, 12, dt);
-      this.camLook.y = THREE.MathUtils.damp(this.camLook.y, _camLookTarget.y, 12, dt);
-      this.camLook.z = THREE.MathUtils.damp(this.camLook.z, _camLookTarget.z, 12, dt);
+      this.camLook.x = THREE.MathUtils.damp(this.camLook.x, _camLookTarget.x, 12.5, dt);
+      this.camLook.y = THREE.MathUtils.damp(this.camLook.y, _camLookTarget.y, 12.5, dt);
+      this.camLook.z = THREE.MathUtils.damp(this.camLook.z, _camLookTarget.z, 12.5, dt);
 
       this.camera.position.copy(this.camPos);
-      if (this.cameraShake > 0.005) {
-        this.camera.position.x += (Math.random() - 0.5) * this.cameraShake;
-        this.camera.position.y += (Math.random() - 0.5) * this.cameraShake;
+
+      // Subtle high-speed road feel & off-road rumble
+      const roadVib =
+        focus.y <= 0.05 && !focus.eliminated
+          ? (focus.offRoad ? 0.075 * speedRatio : speedRatio > 0.65 ? 0.018 * (speedRatio - 0.65) : 0)
+          : 0;
+      const totalShake = this.cameraShake + roadVib;
+      if (totalShake > 0.003) {
+        this.camera.position.x += (Math.random() - 0.5) * totalShake;
+        this.camera.position.y += (Math.random() - 0.5) * totalShake * 0.85;
         this.cameraShake = THREE.MathUtils.damp(this.cameraShake, 0, 14, dt);
       }
+
       this.camera.lookAt(this.camLook);
 
-      const targetFov = focus.boostTimer > 0 ? 74 : 62 + Math.min(8, (Math.abs(focus.speed) / 60) * 8);
+      // Dynamic cornering camera bank roll
+      const targetRoll =
+        -focus.steerAngle * Math.min(1, speedRatio) * 0.065 -
+        focus.visualYawOffset * 0.09;
+      this.camRoll = THREE.MathUtils.damp(this.camRoll, targetRoll, 8, dt);
+      this.camera.rotateZ(this.camRoll);
+
+      const targetFov =
+        (focus.boostTimer > 0 ? 73 : 62 + Math.min(8.5, speedRatio * 8.5)) +
+        this.boostKick * 3.2;
       if (Math.abs(this.camera.fov - targetFov) > 0.1) {
         this.camera.fov = THREE.MathUtils.damp(this.camera.fov, targetFov, 7, dt);
         this.camera.updateProjectionMatrix();
@@ -1029,14 +1206,14 @@ export class GameEngine {
 
       // Update Web Audio engine synth
       this.sound.updateEngine(
-        Math.abs(focus.speed) / 58,
+        Math.abs(focus.speed) / refSpeed,
         focus.driftDir !== 0,
         focus.boostTimer > 0,
-        this.phase === 'racing' || this.phase === 'countdown',
+        (this.phase === 'racing' || this.phase === 'countdown') && !focus.eliminated,
       );
     }
 
-    this.world?.update(this.shaderElapsedSec, this.camera.position);
+    this.world?.update(this.shaderElapsedSec, this.camera.position, currentArenaRadius);
     this.updateSunPostUniforms();
 
     // Push HUD telemetry at ~20Hz so React HUD stays crisp without GC spam
@@ -1044,7 +1221,8 @@ export class GameEngine {
     if (this.hudAccum >= 0.05 && focus) {
       this.hudAccum = 0;
       const kmh = Math.round(Math.abs(focus.speed) * 3.6);
-      const gear = Math.min(5, Math.max(1, Math.floor((Math.abs(focus.speed) / 58) * 4.5) + 1));
+      const refSpeed = isBR ? 28 : 58;
+      const gear = Math.min(5, Math.max(1, Math.floor((Math.abs(focus.speed) / refSpeed) * 4.5) + 1));
       const driftTier: 0 | 1 | 2 | 3 =
         focus.driftCharge >= 2.2
           ? 3
@@ -1056,12 +1234,20 @@ export class GameEngine {
       const stageProgressPct = this.track.isLoop
         ? 0
         : Math.max(0, Math.min(100, Math.round(focus.totalProgress * 100)));
+      const aliveCount = this.racers.filter((r) => !r.eliminated).length;
       this.callbacks.onHudUpdate({
         speedKmh: kmh,
         gear,
         rank: focus.rank,
         totalRacers: this.racers.length,
         isLoop: this.track.isLoop,
+        isBattleRoyale: isBR,
+        aliveCount,
+        knockouts: focus.knockouts,
+        arenaRadius: Math.round(currentArenaRadius),
+        eliminated: focus.eliminated,
+        dashCooldown: focus.dashCooldown,
+        dashActive: focus.dashTimer > 0,
         stageProgressPct,
         lap: Math.min(this.totalLaps, focus.lap),
         totalLaps: this.totalLaps,
@@ -1093,6 +1279,7 @@ export class GameEngine {
                       ? '#ff9f1c'
                       : '#f8fafc',
           isLocal: r.isLocal,
+          eliminated: r.eliminated,
         })),
       });
     }
@@ -1176,11 +1363,16 @@ export class GameEngine {
   };
 
   private onPointerDown = (e: PointerEvent) => {
-    if (this.phase !== 'title' && this.phase !== 'lobby') return;
     const target = e.target as HTMLElement | null;
     if (target && (target.tagName === 'BUTTON' || target.tagName === 'INPUT' || target.closest('button') || target.closest('input') || target.closest('.arcade-panel') || target.closest('form'))) {
       return;
     }
+    if (this.phase === 'racing' && this.track.format === 'battle-royale' && e.button === 0) {
+      this.sound.unlock();
+      this.queuedMouseDash = true;
+      return;
+    }
+    if (this.phase !== 'title' && this.phase !== 'lobby') return;
     this.isDragging = true;
     this.lastPointerX = e.clientX;
   };

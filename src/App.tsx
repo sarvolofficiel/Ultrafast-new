@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { LobbyModal } from './components/LobbyModal';
 import { PauseFinishModal } from './components/PauseFinishModal';
 import { RaceHUD } from './components/RaceHUD';
@@ -7,6 +7,8 @@ import { GameEngine } from './game/GameEngine';
 import {
   CAR_LIVERIES,
   type CarColorId,
+  type CustomLevelData,
+  type DiscordAccount,
   type GamePhase,
   type HudTelemetry,
   type LobbyConfig,
@@ -29,6 +31,13 @@ const INITIAL_HUD: HudTelemetry = {
   rank: 1,
   totalRacers: 4,
   isLoop: false,
+  isBattleRoyale: false,
+  aliveCount: 4,
+  knockouts: 0,
+  arenaRadius: 54,
+  eliminated: false,
+  dashCooldown: 0,
+  dashActive: false,
   stageProgressPct: 0,
   lap: 1,
   totalLaps: 3,
@@ -72,6 +81,19 @@ export default function App() {
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  const [communityLevels, setCommunityLevels] = useState<CustomLevelData[]>([]);
+  const [selectedCustomLevel, setSelectedCustomLevel] =
+    useState<CustomLevelData | null>(null);
+  const [account, setAccount] = useState<DiscordAccount | null>(null);
+  const [authToken, setAuthToken] = useState<string | null>(() => {
+    try {
+      return window.sessionStorage.getItem('ultrafast_auth_token');
+    } catch {
+      return null;
+    }
+  });
+  const [authBusy, setAuthBusy] = useState(false);
+
   const [lobbyConfig, setLobbyConfig] = useState<LobbyConfig>({
     roomCode: '',
     trackId: 'baie-pixel',
@@ -81,6 +103,7 @@ export default function App() {
     totalLaps: 3,
     fillWithAI: true,
     maxPlayers: 8,
+    customLevel: null,
   });
   const [lobbyPlayers, setLobbyPlayers] = useState<LobbyPlayer[]>([]);
   const [localPeerId, setLocalPeerId] = useState('local-player');
@@ -101,10 +124,123 @@ export default function App() {
   seedRef.current = mapSeed;
   const formatRef = useRef<RaceFormat>(raceFormat);
   formatRef.current = raceFormat;
+  const customLevelRef = useRef<CustomLevelData | null>(selectedCustomLevel);
+  customLevelRef.current = selectedCustomLevel;
   const lobbyConfigRef = useRef<LobbyConfig>(lobbyConfig);
   lobbyConfigRef.current = lobbyConfig;
   const nameRef = useRef<string>(playerName);
   nameRef.current = playerName;
+  const accountRef = useRef<DiscordAccount | null>(account);
+  accountRef.current = account;
+  const authTokenRef = useRef<string | null>(authToken);
+  authTokenRef.current = authToken;
+
+  const fetchAccount = useCallback(
+    async (overrideToken?: string | null, applyProfile = false) => {
+      try {
+        const tokenToUse = overrideToken !== undefined ? overrideToken : authTokenRef.current;
+        const headers: Record<string, string> = {};
+        if (tokenToUse) {
+          headers.Authorization = `Bearer ${tokenToUse}`;
+        }
+        const res = await fetch('/api/auth/me', {
+          credentials: 'include',
+          headers,
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as { user?: DiscordAccount | null };
+        const user = data.user ?? null;
+        setAccount(user);
+        accountRef.current = user;
+        if (user && applyProfile) {
+          const nextName = user.preferredName || user.displayName.slice(0, 14);
+          setPlayerName(nextName);
+          nameRef.current = nextName;
+          setColorId(user.preferredColorId);
+          colorRef.current = user.preferredColorId;
+          engineRef.current?.setupShowcaseCar(user.preferredColorId);
+        }
+      } catch {
+        // ignore auth check errors
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    void fetchAccount(undefined, true);
+
+    const handleOAuthMessage = (event: MessageEvent) => {
+      const origin = event.origin;
+      if (
+        origin !== window.location.origin &&
+        !origin.endsWith('.run.app') &&
+        !origin.includes('localhost')
+      ) {
+        return;
+      }
+      const data = event.data as { type?: string; token?: string; error?: string } | null;
+      if (!data || typeof data !== 'object') return;
+      if (data.type === 'OAUTH_AUTH_SUCCESS') {
+        setAuthBusy(false);
+        setErrorMessage(null);
+        if (typeof data.token === 'string' && data.token.length > 0) {
+          setAuthToken(data.token);
+          authTokenRef.current = data.token;
+          try {
+            window.sessionStorage.setItem('ultrafast_auth_token', data.token);
+          } catch {
+            // ignore storage errors
+          }
+          void fetchAccount(data.token, true);
+        } else {
+          void fetchAccount(undefined, true);
+        }
+      } else if (data.type === 'OAUTH_AUTH_ERROR') {
+        setAuthBusy(false);
+        setErrorMessage(data.error || 'Connexion Discord annulée.');
+      }
+    };
+
+    window.addEventListener('message', handleOAuthMessage);
+    return () => window.removeEventListener('message', handleOAuthMessage);
+  }, [fetchAccount]);
+
+  const refreshCommunityLevels = useCallback(async () => {
+    try {
+      const res = await fetch('/api/levels');
+      if (!res.ok) return;
+      const data = (await res.json()) as { levels?: CustomLevelData[] };
+      if (Array.isArray(data.levels)) {
+        setCommunityLevels(data.levels);
+      }
+    } catch {
+      // ignore network fetch failure
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshCommunityLevels();
+
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${proto}//${window.location.host}/ws`);
+    ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(String(ev.data)) as {
+          type?: string;
+          levels?: CustomLevelData[];
+        };
+        if (msg.type === 'levels:updated' && Array.isArray(msg.levels)) {
+          setCommunityLevels(msg.levels);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    return () => {
+      ws.close();
+    };
+  }, [refreshCommunityLevels]);
 
   useEffect(() => {
     const mount = canvasMountRef.current;
@@ -119,7 +255,47 @@ export default function App() {
         phaseRef.current = nextPhase;
         setPhase(nextPhase);
       },
-      onRaceFinished: (racers) => setFinishRacers(racers),
+      onRaceFinished: (racers) => {
+        setFinishRacers(racers);
+        if (accountRef.current) {
+          const local = racers.find((r) => r.isLocal);
+          if (local) {
+            const activeFmt =
+              roleRef.current === 'offline'
+                ? customLevelRef.current?.format ?? formatRef.current
+                : lobbyConfigRef.current.raceFormat;
+            const isBR = activeFmt === 'battle-royale';
+            const headers: Record<string, string> = {
+              'Content-Type': 'application/json',
+            };
+            if (authTokenRef.current) {
+              headers.Authorization = `Bearer ${authTokenRef.current}`;
+            }
+            fetch('/api/account/race-result', {
+              method: 'POST',
+              credentials: 'include',
+              headers,
+              body: JSON.stringify({
+                rank: local.rank,
+                isBattleRoyale: isBR,
+                won: isBR ? !local.eliminated && local.rank === 1 : local.rank === 1,
+                knockouts: local.knockouts,
+                bestLapMs: local.bestLapMs,
+              }),
+            })
+              .then((r) => (r.ok ? r.json() : null))
+              .then((data: { user?: DiscordAccount } | null) => {
+                if (data?.user) {
+                  setAccount(data.user);
+                  accountRef.current = data.user;
+                }
+              })
+              .catch(() => {
+                // ignore stats error
+              });
+          }
+        }
+      },
       onPauseRequested: () => {
         if (roleRef.current === 'offline') {
           setPhase((prev) => {
@@ -145,7 +321,12 @@ export default function App() {
       },
     });
     engineRef.current = engine;
-    engine.loadWorld(trackRef.current, seedRef.current, formatRef.current);
+    engine.loadWorld(
+      trackRef.current,
+      seedRef.current,
+      formatRef.current,
+      customLevelRef.current,
+    );
 
     net.setCallbacks({
       onLobbyUpdated: (cfg, players) => {
@@ -159,6 +340,7 @@ export default function App() {
             colorRef.current,
             cfg.mapSeed,
             cfg.raceFormat,
+            cfg.customLevel ?? null,
           );
         }
       },
@@ -177,6 +359,7 @@ export default function App() {
           role: 'client',
           localId: net.getPeerId(),
           participants,
+          customLevel: cfg.customLevel ?? null,
         });
       },
       onBackToLobby: () => {
@@ -187,6 +370,7 @@ export default function App() {
           colorRef.current,
           cfg.mapSeed,
           cfg.raceFormat,
+          cfg.customLevel ?? null,
         );
       },
       onSnapshot: (snap) => {
@@ -194,6 +378,9 @@ export default function App() {
       },
       onRemoteInput: (peerId, input) => {
         engine.receiveRemoteInput(peerId, input);
+      },
+      onLevelsUpdated: (levels) => {
+        setCommunityLevels(levels);
       },
       onRoomClosed: (reason) => {
         roleRef.current = 'offline';
@@ -227,30 +414,147 @@ export default function App() {
   }, []);
 
   const handleTrackChange = (nextTrack: TrackId) => {
+    setSelectedCustomLevel(null);
+    customLevelRef.current = null;
     setTrackId(nextTrack);
-    engineRef.current?.loadWorld(nextTrack, mapSeed, raceFormat);
+    engineRef.current?.loadWorld(nextTrack, mapSeed, raceFormat, null);
   };
 
   const handleFormatPreferenceChange = (pref: RaceFormatPreference) => {
     const nextSeed = generateRandomSeed();
     const nextFmt = resolveRaceFormat(pref, nextSeed);
+    setSelectedCustomLevel(null);
+    customLevelRef.current = null;
     setFormatPreference(pref);
     setMapSeed(nextSeed);
     setRaceFormat(nextFmt);
-    engineRef.current?.loadWorld(trackId, nextSeed, nextFmt);
+    engineRef.current?.loadWorld(trackId, nextSeed, nextFmt, null);
   };
 
   const handleShuffleMap = () => {
     const nextSeed = generateRandomSeed();
     const nextFmt = resolveRaceFormat(formatPreference, nextSeed);
+    setSelectedCustomLevel(null);
+    customLevelRef.current = null;
     setMapSeed(nextSeed);
     setRaceFormat(nextFmt);
-    engineRef.current?.loadWorld(trackId, nextSeed, nextFmt);
+    engineRef.current?.loadWorld(trackId, nextSeed, nextFmt, null);
+  };
+
+  const handleSelectCustomLevel = (level: CustomLevelData | null) => {
+    setSelectedCustomLevel(level);
+    customLevelRef.current = level;
+    if (level) {
+      setTrackId(level.biome);
+      setRaceFormat(level.format);
+      engineRef.current?.loadWorld(level.biome, mapSeed, level.format, level);
+    } else {
+      engineRef.current?.loadWorld(trackId, mapSeed, raceFormat, null);
+    }
+  };
+
+  const handleLevelPublished = (level: CustomLevelData) => {
+    setCommunityLevels((prev) => {
+      const rest = prev.filter((item) => item.id !== level.id);
+      return [level, ...rest];
+    });
+    handleSelectCustomLevel(level);
+  };
+
+  const syncAccountProfile = useCallback(
+    (partial: { preferredName?: string; preferredColorId?: CarColorId }) => {
+      if (!accountRef.current) return;
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (authTokenRef.current) {
+        headers.Authorization = `Bearer ${authTokenRef.current}`;
+      }
+      fetch('/api/account/profile', {
+        method: 'PATCH',
+        credentials: 'include',
+        headers,
+        body: JSON.stringify(partial),
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data: { user?: DiscordAccount } | null) => {
+          if (data?.user) {
+            setAccount(data.user);
+            accountRef.current = data.user;
+          }
+        })
+        .catch(() => {
+          // ignore
+        });
+    },
+    [],
+  );
+
+  const handlePlayerNameChange = (nextName: string) => {
+    setPlayerName(nextName);
+    nameRef.current = nextName;
+    if (accountRef.current && nextName.trim().length > 0) {
+      syncAccountProfile({ preferredName: nextName });
+    }
   };
 
   const handleColorChange = (nextColor: CarColorId) => {
     setColorId(nextColor);
+    colorRef.current = nextColor;
     engineRef.current?.setupShowcaseCar(nextColor);
+    if (accountRef.current) {
+      syncAccountProfile({ preferredColorId: nextColor });
+    }
+  };
+
+  const handleDiscordLogin = async () => {
+    setErrorMessage(null);
+    setAuthBusy(true);
+    try {
+      const res = await fetch('/api/auth/discord/url');
+      const data = (await res.json()) as { url?: string; error?: string };
+      if (!res.ok || !data.url) {
+        setAuthBusy(false);
+        setErrorMessage(
+          data.error || 'Connexion Discord indisponible pour le moment.',
+        );
+        return;
+      }
+      const popup = window.open(
+        data.url,
+        'ultrafast_discord_oauth',
+        'width=540,height=720',
+      );
+      if (!popup) {
+        setAuthBusy(false);
+        setErrorMessage(
+          'Autorisez les fenêtres pop-up dans votre navigateur pour vous connecter via Discord.',
+        );
+      }
+    } catch {
+      setAuthBusy(false);
+      setErrorMessage('Impossible de démarrer la connexion Discord.');
+    }
+  };
+
+  const handleDiscordLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+      });
+    } catch {
+      // ignore
+    }
+    try {
+      window.sessionStorage.removeItem('ultrafast_auth_token');
+    } catch {
+      // ignore
+    }
+    setAuthToken(null);
+    authTokenRef.current = null;
+    setAccount(null);
+    accountRef.current = null;
   };
 
   const handleToggleMute = () => {
@@ -270,21 +574,31 @@ export default function App() {
     setPixelMode(next);
   };
 
-  const buildSoloParticipants = () => {
+  const buildSoloParticipants = (targetFmt: RaceFormat = raceFormat) => {
     const cleanName = playerName.trim() || 'PILOTE 01';
     const availableLiveries = CAR_LIVERIES.filter((l) => l.id !== colorId);
+    const botCount = targetFmt === 'battle-royale' ? 5 : 3;
     const participants = [
       { id: 'local-player', name: cleanName, colorId, isAI: false },
     ];
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < botCount; i++) {
       participants.push({
         id: `ai-${i + 1}`,
-        name: AI_BOT_NAMES[i],
+        name: AI_BOT_NAMES[i % AI_BOT_NAMES.length],
         colorId: availableLiveries[i % availableLiveries.length].id,
         isAI: true,
       });
     }
     return participants;
+  };
+
+  const recordLevelPlay = (level: CustomLevelData | null) => {
+    if (!level || !level.id || level.id === 'draft-preview') return;
+    fetch(`/api/levels/${encodeURIComponent(level.id)}/play`, {
+      method: 'POST',
+    }).catch(() => {
+      // ignore stats update error
+    });
   };
 
   const handleQuickSolo = () => {
@@ -296,14 +610,44 @@ export default function App() {
     setRole('offline');
     setLocalPeerId('local-player');
     phaseRef.current = 'countdown';
+    const activeCustom = customLevelRef.current;
+    const activeTrack = activeCustom ? activeCustom.biome : trackId;
+    const activeFmt = activeCustom ? activeCustom.format : raceFormat;
+    recordLevelPlay(activeCustom);
     engine.startRace({
-      trackId,
+      trackId: activeTrack,
       mapSeed,
-      raceFormat,
+      raceFormat: activeFmt,
       totalLaps: 3,
       role: 'offline',
       localId: 'local-player',
-      participants: buildSoloParticipants(),
+      participants: buildSoloParticipants(activeFmt),
+      customLevel: activeCustom,
+    });
+  };
+
+  const handlePlaytestCustomLevel = (draft: CustomLevelData) => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    setErrorMessage(null);
+    networkRef.current?.disconnect();
+    roleRef.current = 'offline';
+    setRole('offline');
+    setLocalPeerId('local-player');
+    setSelectedCustomLevel(draft);
+    customLevelRef.current = draft;
+    setTrackId(draft.biome);
+    setRaceFormat(draft.format);
+    phaseRef.current = 'countdown';
+    engine.startRace({
+      trackId: draft.biome,
+      mapSeed,
+      raceFormat: draft.format,
+      totalLaps: 3,
+      role: 'offline',
+      localId: 'local-player',
+      participants: buildSoloParticipants(draft.format),
+      customLevel: draft,
     });
   };
 
@@ -316,20 +660,30 @@ export default function App() {
     setBusyMessage('Ouverture du salon sur votre PC...');
     try {
       const cleanName = playerName.trim() || 'HÔTE';
+      const activeCustom = customLevelRef.current;
+      const activeTrack = activeCustom ? activeCustom.biome : trackId;
+      const activeFmt = activeCustom ? activeCustom.format : raceFormat;
       const { peerId } = await net.createHostRoom(
         cleanName,
         colorId,
-        trackId,
+        activeTrack,
         3,
         mapSeed,
-        raceFormat,
+        activeFmt,
         formatPreference,
+        activeCustom,
       );
       setLocalPeerId(peerId);
       roleRef.current = 'host';
       setRole('host');
       phaseRef.current = 'lobby';
-      engine.setLobbyPreview(trackId, colorId, mapSeed, raceFormat);
+      engine.setLobbyPreview(
+        activeTrack,
+        colorId,
+        mapSeed,
+        activeFmt,
+        activeCustom,
+      );
     } catch (err) {
       setErrorMessage(
         err instanceof Error ? err.message : 'Erreur lors de la création.',
@@ -353,7 +707,7 @@ export default function App() {
       roleRef.current = 'client';
       setRole('client');
       phaseRef.current = 'lobby';
-      engine.setLobbyPreview(trackId, colorId, mapSeed, raceFormat);
+      engine.setLobbyPreview(trackId, colorId, mapSeed, raceFormat, null);
     } catch (err) {
       setErrorMessage(
         err instanceof Error ? err.message : 'Impossible de rejoindre le salon.',
@@ -382,11 +736,12 @@ export default function App() {
       isAI: false,
     }));
 
-    if (cfg.fillWithAI && participants.length < 4) {
+    const targetCount = cfg.raceFormat === 'battle-royale' ? 6 : 4;
+    if (cfg.fillWithAI && participants.length < targetCount) {
       const usedColors = new Set(participants.map((p) => p.colorId));
       const freeLiveries = CAR_LIVERIES.filter((l) => !usedColors.has(l.id));
       let aiIdx = 0;
-      while (participants.length < 4) {
+      while (participants.length < targetCount) {
         const liv =
           freeLiveries[aiIdx % Math.max(1, freeLiveries.length)] ??
           CAR_LIVERIES[aiIdx % CAR_LIVERIES.length];
@@ -400,6 +755,7 @@ export default function App() {
       }
     }
 
+    recordLevelPlay(cfg.customLevel ?? null);
     phaseRef.current = 'countdown';
     net.hostLaunchRace(participants);
     engine.startRace({
@@ -410,6 +766,7 @@ export default function App() {
       role: 'host',
       localId: net.getPeerId(),
       participants,
+      customLevel: cfg.customLevel ?? null,
     });
   };
 
@@ -420,16 +777,25 @@ export default function App() {
     setBusyMessage(null);
     phaseRef.current = 'title';
     engineRef.current?.returnToTitleView(colorId);
+    void refreshCommunityLevels();
   };
 
   const handleBackToLobby = () => {
     if (role === 'host') {
       const nextSeed = generateRandomSeed();
-      const nextFmt = resolveRaceFormat(lobbyConfig.formatPreference, nextSeed);
+      const nextFmt = lobbyConfig.customLevel
+        ? lobbyConfig.customLevel.format
+        : resolveRaceFormat(lobbyConfig.formatPreference, nextSeed);
       phaseRef.current = 'lobby';
       networkRef.current?.hostReturnToLobby();
       networkRef.current?.updateHostConfig({ mapSeed: nextSeed, raceFormat: nextFmt });
-      engineRef.current?.setLobbyPreview(lobbyConfig.trackId, colorId, nextSeed, nextFmt);
+      engineRef.current?.setLobbyPreview(
+        lobbyConfig.trackId,
+        colorId,
+        nextSeed,
+        nextFmt,
+        lobbyConfig.customLevel ?? null,
+      );
     }
   };
 
@@ -437,6 +803,22 @@ export default function App() {
     if (role !== 'offline') return;
     const engine = engineRef.current;
     if (!engine) return;
+    const activeCustom = customLevelRef.current;
+    if (activeCustom) {
+      recordLevelPlay(activeCustom);
+      phaseRef.current = 'countdown';
+      engine.startRace({
+        trackId: activeCustom.biome,
+        mapSeed,
+        raceFormat: activeCustom.format,
+        totalLaps: 3,
+        role: 'offline',
+        localId: 'local-player',
+        participants: buildSoloParticipants(activeCustom.format),
+        customLevel: activeCustom,
+      });
+      return;
+    }
     const nextSeed = generateRandomSeed();
     const nextFmt = resolveRaceFormat(formatPreference, nextSeed);
     setMapSeed(nextSeed);
@@ -449,7 +831,8 @@ export default function App() {
       totalLaps: 3,
       role: 'offline',
       localId: 'local-player',
-      participants: buildSoloParticipants(),
+      participants: buildSoloParticipants(nextFmt),
+      customLevel: null,
     });
   };
 
@@ -464,7 +847,7 @@ export default function App() {
       {phase === 'title' && (
         <TitleScreen
           playerName={playerName}
-          onPlayerNameChange={setPlayerName}
+          onPlayerNameChange={handlePlayerNameChange}
           colorId={colorId}
           onColorChange={handleColorChange}
           trackId={trackId}
@@ -474,6 +857,11 @@ export default function App() {
           mapSeed={mapSeed}
           onFormatPreferenceChange={handleFormatPreferenceChange}
           onShuffleMap={handleShuffleMap}
+          communityLevels={communityLevels}
+          selectedCustomLevel={selectedCustomLevel}
+          onSelectCustomLevel={handleSelectCustomLevel}
+          onPlaytestCustomLevel={handlePlaytestCustomLevel}
+          onLevelPublished={handleLevelPublished}
           initialRoomCode={initialRoomCode}
           muted={muted}
           onToggleMute={handleToggleMute}
@@ -485,7 +873,12 @@ export default function App() {
           onHostGame={handleHostGame}
           onJoinGame={handleJoinGame}
           carName={playerName}
-          onCarNameChange={setPlayerName}
+          onCarNameChange={handlePlayerNameChange}
+          account={account}
+          authToken={authToken}
+          authBusy={authBusy}
+          onDiscordLogin={handleDiscordLogin}
+          onDiscordLogout={handleDiscordLogout}
         />
       )}
 
@@ -495,6 +888,7 @@ export default function App() {
           localId={localPeerId}
           config={lobbyConfig}
           players={lobbyPlayers}
+          communityLevels={communityLevels}
           onUpdateConfig={(partial) =>
             networkRef.current?.updateHostConfig(partial)
           }
@@ -509,6 +903,11 @@ export default function App() {
           trackId={role === 'offline' ? trackId : lobbyConfig.trackId}
           mapSeed={role === 'offline' ? mapSeed : lobbyConfig.mapSeed}
           raceFormat={role === 'offline' ? raceFormat : lobbyConfig.raceFormat}
+          customLevel={
+            role === 'offline'
+              ? selectedCustomLevel
+              : (lobbyConfig.customLevel ?? null)
+          }
           role={role}
           peerCount={Math.max(1, lobbyPlayers.length)}
           clientPingMs={networkRef.current?.getClientPingMs() ?? 0}
@@ -537,6 +936,7 @@ export default function App() {
         <PauseFinishModal
           mode={phase}
           role={role}
+          raceFormat={role === 'offline' ? raceFormat : lobbyConfig.raceFormat}
           racers={finishRacers}
           onResume={() => {
             if (role === 'offline') {

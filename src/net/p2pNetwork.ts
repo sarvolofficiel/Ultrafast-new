@@ -1,5 +1,6 @@
 import type {
   CarColorId,
+  CustomLevelData,
   LobbyConfig,
   LobbyPlayer,
   PlayerInput,
@@ -41,6 +42,7 @@ export interface NetCallbacks {
   onRemoteInput?: (peerId: string, input: PlayerInput) => void;
   onRoomClosed?: (reason: string) => void;
   onError?: (message: string) => void;
+  onLevelsUpdated?: (levels: CustomLevelData[]) => void;
 }
 
 const RTC_CONFIG: RTCConfiguration = {
@@ -159,6 +161,7 @@ export class P2PNetworkManager {
     mapSeed: number,
     raceFormat: RaceFormat,
     formatPreference: RaceFormatPreference,
+    customLevel: CustomLevelData | null = null,
   ): Promise<{ roomCode: string; peerId: string }> {
     this.disconnect();
     await this.connectWS();
@@ -200,6 +203,7 @@ export class P2PNetworkManager {
             totalLaps,
             fillWithAI: true,
             maxPlayers: 8,
+            customLevel,
           };
           this.hostPlayers = [
             {
@@ -293,6 +297,11 @@ export class P2PNetworkManager {
 
   private handleWsMessage(msg: Record<string, unknown>): void {
     const type = msg.type;
+
+    if (type === 'levels:updated' && Array.isArray(msg.levels)) {
+      this.callbacks.onLevelsUpdated?.(msg.levels as CustomLevelData[]);
+      return;
+    }
 
     if (type === 'peer:joined' && this.role === 'host') {
       const remoteId = String(msg.peerId);
